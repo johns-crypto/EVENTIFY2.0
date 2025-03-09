@@ -1,0 +1,21 @@
+/* tailwindcss */
+@tailwind base;
+@tailwind components;
+
+@layer components {
+  .btn-primary {
+    @apply bg-secondary-deepRed text-neutral-lightGray px-4 py-2 rounded hover:bg-secondary-darkRed transition-colors;
+  }
+  .card {
+    @apply bg-neutral-offWhite p-4 rounded shadow border-l-4 border-primary-navy;
+  }
+}
+
+@tailwind utilities;
+
+.Toastify__toast--success {
+  @apply bg-accent-gold text-neutral-darkGray;
+}
+.Toastify__toast--error {
+  @apply bg-secondary-deepRed text-neutral-lightGray;
+}
