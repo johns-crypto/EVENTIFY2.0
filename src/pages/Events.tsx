@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { collection, getDocs, doc, updateDoc, addDoc, collection as firestoreCollection } from 'firebase/firestore';
+import { collection, getDocs, doc, updateDoc, addDoc } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage } from '../services/firebase';
 import { useAuth } from '../context/AuthContext';
@@ -88,7 +88,17 @@ function Events() {
       const snapshot = await getDocs(eventsCol);
       const eventsData = snapshot.docs.map((doc) => ({
         id: doc.id,
-        ...doc.data(),
+        title: doc.data().title,
+        date: doc.data().date,
+        description: doc.data().description,
+        category: doc.data().category,
+        imageUrl: doc.data().imageUrl || doc.data().image,
+        organizerId: doc.data().organizerId,
+        organizers: doc.data().organizers || [],
+        visibility: doc.data().visibility || 'public',
+        inviteLink: doc.data().inviteLink,
+        invitedUsers: doc.data().invitedUsers || [],
+        pendingInvites: doc.data().pendingInvites || [],
       })) as Event[];
       setEvents(eventsData);
 
@@ -100,17 +110,23 @@ function Events() {
       const postsData: { [eventId: string]: Post[] } = {};
       for (const event of eventsData) {
         if (currentUser && (event.organizers.includes(currentUser.uid) || event.invitedUsers.includes(currentUser.uid))) {
-          const postsCol = firestoreCollection(db, 'events', event.id, 'posts');
+          const postsCol = collection(db, 'events', event.id, 'posts');
           const postsSnapshot = await getDocs(postsCol);
           postsData[event.id] = postsSnapshot.docs.map((doc) => ({
             id: doc.id,
-            ...doc.data(),
+            userId: doc.data().userId,
+            mediaUrl: doc.data().mediaUrl,
+            type: doc.data().type as 'photo' | 'video',
+            visibility: doc.data().visibility as 'public' | 'private',
+            likes: doc.data().likes || [],
+            comments: doc.data().comments || [],
+            createdAt: doc.data().createdAt,
           })) as Post[];
         }
       }
       setPosts(postsData);
-    } catch (err) {
-      setError('Failed to fetch events or posts.');
+    } catch (err: any) {
+      setError('Failed to fetch events or posts: ' + err.message);
       console.error('Error fetching data:', err);
     } finally {
       setLoading(false);
@@ -156,38 +172,54 @@ function Events() {
 
   const requestInvite = async (eventId: string) => {
     if (!currentUser) return setError('Please log in to request an invite.');
-    const eventRef = doc(db, 'events', eventId);
-    const event = events.find((e) => e.id === eventId);
-    if (event && !event.pendingInvites.includes(currentUser.uid)) {
-      await updateDoc(eventRef, {
-        pendingInvites: [...event.pendingInvites, currentUser.uid],
-      });
-      fetchEvents();
+    try {
+      const eventRef = doc(db, 'events', eventId);
+      const event = events.find((e) => e.id === eventId);
+      if (event && !event.pendingInvites.includes(currentUser.uid)) {
+        await updateDoc(eventRef, {
+          pendingInvites: [...event.pendingInvites, currentUser.uid],
+        });
+        fetchEvents();
+      }
+    } catch (err) {
+      setError('Failed to request invite.');
+      console.error('Error requesting invite:', err);
     }
   };
 
   const approveInvite = async (eventId: string, userId: string) => {
-    const eventRef = doc(db, 'events', eventId);
-    const event = events.find((e) => e.id === eventId);
-    if (event && event.organizerId === currentUser?.uid) {
-      await updateDoc(eventRef, {
-        invitedUsers: [...event.invitedUsers, userId],
-        pendingInvites: event.pendingInvites.filter((id) => id !== userId),
-      });
-      fetchEvents();
+    if (!currentUser) return;
+    try {
+      const eventRef = doc(db, 'events', eventId);
+      const event = events.find((e) => e.id === eventId);
+      if (event && event.organizerId === currentUser.uid) {
+        await updateDoc(eventRef, {
+          invitedUsers: [...event.invitedUsers, userId],
+          pendingInvites: event.pendingInvites.filter((id) => id !== userId),
+        });
+        fetchEvents();
+      }
+    } catch (err) {
+      setError('Failed to approve invite.');
+      console.error('Error approving invite:', err);
     }
   };
 
   const addCollaborator = async (eventId: string) => {
     if (!newCollaborator || !currentUser) return;
-    const eventRef = doc(db, 'events', eventId);
-    const event = events.find((e) => e.id === eventId);
-    if (event && event.organizerId === currentUser.uid && !event.organizers.includes(newCollaborator)) {
-      await updateDoc(eventRef, {
-        organizers: [...event.organizers, newCollaborator],
-      });
-      setNewCollaborator('');
-      fetchEvents();
+    try {
+      const eventRef = doc(db, 'events', eventId);
+      const event = events.find((e) => e.id === eventId);
+      if (event && event.organizerId === currentUser.uid && !event.organizers.includes(newCollaborator)) {
+        await updateDoc(eventRef, {
+          organizers: [...event.organizers, newCollaborator],
+        });
+        setNewCollaborator('');
+        fetchEvents();
+      }
+    } catch (err) {
+      setError('Failed to add collaborator.');
+      console.error('Error adding collaborator:', err);
     }
   };
 
@@ -221,8 +253,8 @@ function Events() {
       setShowCreateForm(false);
       setShowOptions(docRef.id);
       fetchEvents();
-    } catch (err) {
-      setError('Failed to create event.');
+    } catch (err: any) {
+      setError('Failed to create event: ' + err.message);
       console.error('Error creating event:', err);
     } finally {
       setLoading(false);
@@ -248,11 +280,11 @@ function Events() {
         comments: [],
         createdAt: new Date().toISOString(),
       };
-      await addDoc(firestoreCollection(db, 'events', eventId, 'posts'), postData);
+      await addDoc(collection(db, 'events', eventId, 'posts'), postData);
       setNewPost((prev) => ({ ...prev, [eventId]: { media: null, visibility: 'public' } }));
       fetchEvents();
-    } catch (err) {
-      setError('Failed to post media.');
+    } catch (err: any) {
+      setError('Failed to post media: ' + err.message);
       console.error('Error posting media:', err);
     } finally {
       setLoading(false);
@@ -260,26 +292,36 @@ function Events() {
   };
 
   const handleLike = async (eventId: string, postId: string) => {
-    if (!currentUser) return;
-    const postRef = doc(db, 'events', eventId, 'posts', postId);
-    const post = posts[eventId]?.find((p) => p.id === postId);
-    if (post) {
-      const likes = post.likes.includes(currentUser.uid)
-        ? post.likes.filter((id) => id !== currentUser.uid)
-        : [...post.likes, currentUser.uid];
-      await updateDoc(postRef, { likes });
-      fetchEvents();
+    if (!currentUser) return setError('Please log in to like posts.');
+    try {
+      const postRef = doc(db, 'events', eventId, 'posts', postId);
+      const post = posts[eventId]?.find((p) => p.id === postId);
+      if (post) {
+        const likes = post.likes.includes(currentUser.uid)
+          ? post.likes.filter((id) => id !== currentUser.uid)
+          : [...post.likes, currentUser.uid];
+        await updateDoc(postRef, { likes });
+        fetchEvents();
+      }
+    } catch (err) {
+      setError('Failed to update like.');
+      console.error('Error liking post:', err);
     }
   };
 
   const handleComment = async (eventId: string, postId: string, text: string) => {
-    if (!currentUser || !text) return;
-    const postRef = doc(db, 'events', eventId, 'posts', postId);
-    const post = posts[eventId]?.find((p) => p.id === postId);
-    if (post) {
-      const comments = [...post.comments, { userId: currentUser.uid, text }];
-      await updateDoc(postRef, { comments });
-      fetchEvents();
+    if (!currentUser || !text.trim()) return setError('Please log in and enter a comment.');
+    try {
+      const postRef = doc(db, 'events', eventId, 'posts', postId);
+      const post = posts[eventId]?.find((p) => p.id === postId);
+      if (post) {
+        const comments = [...post.comments, { userId: currentUser.uid, text }];
+        await updateDoc(postRef, { comments });
+        fetchEvents();
+      }
+    } catch (err) {
+      setError('Failed to add comment.');
+      console.error('Error adding comment:', err);
     }
   };
 
@@ -421,7 +463,7 @@ function Events() {
                         onChange={(e) =>
                           setNewPost((prev) => ({
                             ...prev,
-                            [event.id]: { ...prev[event.id], media: e.target.files?.[0] || null },
+                            [event.id]: { ...prev[event.id], media: e.target.files?.[0] || null, visibility: prev[event.id]?.visibility || 'public' },
                           }))
                         }
                         className="w-full p-2"
@@ -471,6 +513,7 @@ function Events() {
                                 className="flex items-center space-x-1"
                                 onClick={() => handleLike(event.id, post.id)}
                                 aria-label={`Like post by ${post.userId}`}
+                                disabled={!currentUser}
                               >
                                 <FaHeart
                                   className={post.likes.includes(currentUser?.uid || '') ? 'text-red-600' : 'text-gray-400'}
@@ -487,21 +530,27 @@ function Events() {
                                 <strong>{comment.userId}:</strong> {comment.text}
                               </p>
                             ))}
-                            <label htmlFor={`comment-${post.id}`} className="sr-only">
-                              Add a comment
-                            </label>
-                            <input
-                              id={`comment-${post.id}`}
-                              type="text"
-                              placeholder="Add a comment..."
-                              onKeyPress={(e) => {
-                                if (e.key === 'Enter' && e.currentTarget.value) {
-                                  handleComment(event.id, post.id, e.currentTarget.value);
-                                  e.currentTarget.value = '';
-                                }
-                              }}
-                              className="w-full p-1 mt-2 rounded bg-neutral-offWhite text-neutral-darkGray"
-                            />
+                            {currentUser ? (
+                              <>
+                                <label htmlFor={`comment-${post.id}`} className="sr-only">
+                                  Add a comment
+                                </label>
+                                <input
+                                  id={`comment-${post.id}`}
+                                  type="text"
+                                  placeholder="Add a comment..."
+                                  onKeyPress={(e) => {
+                                    if (e.key === 'Enter' && e.currentTarget.value) {
+                                      handleComment(event.id, post.id, e.currentTarget.value);
+                                      e.currentTarget.value = '';
+                                    }
+                                  }}
+                                  className="w-full p-1 mt-2 rounded bg-neutral-offWhite text-neutral-darkGray"
+                                />
+                              </>
+                            ) : (
+                              <p className="text-sm mt-2">Log in to comment.</p>
+                            )}
                           </div>
                         ))}
                       </div>

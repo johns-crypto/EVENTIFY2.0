@@ -1,10 +1,9 @@
-// src/pages/Home.tsx
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { useAuth } from '../context/AuthContext';
 import { Link } from 'react-router-dom';
 import { getEvents, EventData, getUserData, db, storage } from '../services/firebase';
-import { doc, setDoc } from 'firebase/firestore';
+import { doc, setDoc, collection } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { toast } from 'react-toastify';
 
@@ -13,6 +12,7 @@ function Home() {
   const [events, setEvents] = useState<EventData[]>([]);
   const [username, setUsername] = useState('');
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
   const [formData, setFormData] = useState({
     title: '',
@@ -21,7 +21,6 @@ function Home() {
     image: null as File | null,
   });
 
-  // Animation variants for sections
   const fadeIn = {
     hidden: { opacity: 0, y: 20 },
     visible: { opacity: 1, y: 0, transition: { duration: 0.6 } },
@@ -31,7 +30,6 @@ function Home() {
     visible: { transition: { staggerChildren: 0.2 } },
   };
 
-  // Animation variants for headings
   const headingFade = {
     hidden: { opacity: 0, y: -30 },
     visible: {
@@ -41,21 +39,36 @@ function Home() {
     },
   };
 
-  // Fetch events and user data on mount
   useEffect(() => {
     const fetchData = async () => {
+      setLoading(true);
+      setError(null);
       try {
+        console.log('Fetching events, user:', currentUser?.uid);
         const eventData = await getEvents();
-        setEvents(eventData);
+        console.log('Raw event data:', eventData);
+        const filteredEvents = eventData.filter((event) =>
+          event.visibility === 'public' ||
+          (currentUser && (
+            event.userId === currentUser.uid ||
+            event.organizers?.includes(currentUser.uid) ||
+            event.invitedUsers?.includes(currentUser.uid)
+          ))
+        );
+        setEvents(filteredEvents);
+        console.log('Filtered events:', filteredEvents);
 
         if (currentUser) {
+          console.log('Fetching user data for:', currentUser.uid);
           const userData = await getUserData(currentUser.uid);
-          setUsername(userData?.displayName || currentUser.email.split('@')[0]);
+          setUsername(userData?.displayName || currentUser.email?.split('@')[0] || 'User');
+          console.log('User data:', userData);
         } else {
           setUsername('');
         }
-      } catch (error) {
-        console.error('Error fetching data:', error);
+      } catch (err: any) {
+        setError('Failed to load events or user data: ' + err.message);
+        console.error('Error fetching data:', err);
         toast.error('Failed to load events.');
       } finally {
         setLoading(false);
@@ -65,7 +78,6 @@ function Home() {
     fetchData();
   }, [currentUser]);
 
-  // Handle form input changes
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value, files } = e.target;
     setFormData((prev) => ({
@@ -74,19 +86,26 @@ function Home() {
     }));
   };
 
-  // Handle event creation
   const handleCreateEvent = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!currentUser) return;
+    if (!currentUser) {
+      setError('Please log in to create an event.');
+      toast.error('Please log in to create an event.');
+      return;
+    }
 
     setLoading(true);
+    setError(null);
     try {
-      const eventId = doc(collection(db, 'events')).id; // Generate a new ID
+      const eventId = doc(collection(db, 'events')).id;
+      console.log('Creating event with ID:', eventId);
       let imageUrl = '';
       if (formData.image) {
         const storageRef = ref(storage, `events/${eventId}/${formData.image.name}`);
+        console.log('Uploading image to:', storageRef.fullPath);
         await uploadBytes(storageRef, formData.image);
         imageUrl = await getDownloadURL(storageRef);
+        console.log('Image URL:', imageUrl);
       }
 
       const newEvent: EventData = {
@@ -94,18 +113,24 @@ function Home() {
         title: formData.title,
         userId: currentUser.uid,
         createdAt: new Date().toISOString(),
-        location: formData.location,
         date: formData.date,
+        location: formData.location,
         image: imageUrl || undefined,
+        visibility: 'public',
+        organizers: [currentUser.uid],
+        invitedUsers: [],
+        pendingInvites: [],
       };
 
+      console.log('Saving event:', newEvent);
       await setDoc(doc(db, 'events', eventId), newEvent);
-      setEvents((prev) => [newEvent, ...prev]); // Add to local state
+      setEvents((prev) => [newEvent, ...prev]);
       setShowModal(false);
-      setFormData({ title: '', date: '', location: '', image: null }); // Reset form
+      setFormData({ title: '', date: '', location: '', image: null });
       toast.success('Event created successfully!');
-    } catch (error) {
-      console.error('Error creating event:', error);
+    } catch (err: any) {
+      setError('Failed to create event: ' + err.message);
+      console.error('Error creating event:', err);
       toast.error('Failed to create event.');
     } finally {
       setLoading(false);
@@ -144,7 +169,6 @@ function Home() {
 
   return (
     <div className="min-h-screen bg-neutral-darkGray text-neutral-lightGray">
-      {/* Hero Section */}
       <section className="py-16 px-4 flex items-center justify-center bg-primary-navy">
         <motion.div
           className="max-w-4xl text-center"
@@ -165,6 +189,7 @@ function Home() {
               ? 'Create, share, and join events with your community.'
               : 'Join a world of events—sign up to get started!'}
           </p>
+          {error && <p className="text-red-500 mb-4">{error}</p>}
           {currentUser ? (
             <button
               onClick={() => setShowModal(true)}
@@ -189,7 +214,6 @@ function Home() {
         </motion.div>
       </section>
 
-      {/* Events Preview Section */}
       <section className="py-16 px-4">
         <motion.div
           className="max-w-6xl mx-auto"
@@ -241,7 +265,6 @@ function Home() {
         </motion.div>
       </section>
 
-      {/* Create Event Modal */}
       {showModal && currentUser && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <motion.div
@@ -251,10 +274,12 @@ function Home() {
             exit={{ opacity: 0, scale: 0.9 }}
           >
             <h3 className="text-2xl font-bold text-accent-gold mb-4">Create New Event</h3>
+            {error && <p className="text-red-500 mb-4">{error}</p>}
             <form onSubmit={handleCreateEvent} className="space-y-4">
               <div>
-                <label className="block text-sm text-neutral-lightGray">Title</label>
+                <label htmlFor="title" className="block text-sm text-neutral-lightGray">Title</label>
                 <input
+                  id="title"
                   type="text"
                   name="title"
                   value={formData.title}
@@ -263,39 +288,46 @@ function Home() {
                   required
                   minLength={3}
                   placeholder="Enter event title (min 3 chars)"
+                  aria-label="Event Title"
                 />
               </div>
               <div>
-                <label className="block text-sm text-neutral-lightGray">Date</label>
+                <label htmlFor="date" className="block text-sm text-neutral-lightGray">Date</label>
                 <input
+                  id="date"
                   type="date"
                   name="date"
                   value={formData.date}
                   onChange={handleInputChange}
                   className="w-full p-2 mt-1 bg-neutral-offWhite text-neutral-darkGray rounded"
                   required
-                  min={new Date().toISOString().split('T')[0]} // No past dates
+                  min={new Date().toISOString().split('T')[0]}
+                  aria-label="Event Date"
                 />
               </div>
               <div>
-                <label className="block text-sm text-neutral-lightGray">Location</label>
+                <label htmlFor="location" className="block text-sm text-neutral-lightGray">Location</label>
                 <input
+                  id="location"
                   type="text"
                   name="location"
                   value={formData.location}
                   onChange={handleInputChange}
                   className="w-full p-2 mt-1 bg-neutral-offWhite text-neutral-darkGray rounded"
                   placeholder="Enter location (optional)"
+                  aria-label="Event Location"
                 />
               </div>
               <div>
-                <label className="block text-sm text-neutral-lightGray">Image (optional)</label>
+                <label htmlFor="image" className="block text-sm text-neutral-lightGray">Image (optional)</label>
                 <input
+                  id="image"
                   type="file"
                   name="image"
                   onChange={handleInputChange}
                   accept="image/*"
                   className="w-full p-2 mt-1 text-neutral-lightGray"
+                  aria-label="Event Image"
                 />
               </div>
               <div className="flex justify-end space-x-2">

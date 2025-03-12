@@ -2,9 +2,9 @@ import { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { motion } from 'framer-motion';
-import { FaUser, FaEdit, FaSave, FaTrash } from 'react-icons/fa'; // Removed FaCamera
-import { doc, getDoc, updateDoc, collection, query, where, getDocs, deleteDoc, orderBy } from 'firebase/firestore'; // Added orderBy
-import { db, auth, storage } from '../services/firebase';
+import { FaUser, FaEdit, FaSave, FaTrash } from 'react-icons/fa';
+import { doc, getDoc, updateDoc, collection, query, where, getDocs, deleteDoc, orderBy } from 'firebase/firestore';
+import { db, auth, storage, getUserEvents } from '../services/firebase';
 import { updateProfile } from 'firebase/auth';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 
@@ -68,16 +68,7 @@ function Profile() {
             };
         setUserData(userInfo);
 
-        const eventsQuery = query(
-          collection(db, 'events'),
-          where('userId', '==', currentUser.uid),
-          orderBy('createdAt', 'desc') // Fixed missing import
-        );
-        const eventsSnapshot = await getDocs(eventsQuery);
-        const userEvents = eventsSnapshot.docs.map((doc) => ({
-          id: doc.id,
-          ...doc.data(),
-        })) as Event[];
+        const userEvents = await getUserEvents(currentUser.uid);
         setEvents(userEvents);
 
         const allEventsSnapshot = await getDocs(collection(db, 'events'));
@@ -88,7 +79,8 @@ function Profile() {
         for (const eventDoc of allEventsSnapshot.docs) {
           const postsQuery = query(
             collection(db, 'events', eventDoc.id, 'posts'),
-            where('userId', '==', currentUser.uid)
+            where('userId', '==', currentUser.uid),
+            orderBy('createdAt', 'desc')
           );
           const postsSnapshot = await getDocs(postsQuery);
           postsSnapshot.forEach((doc) => {
@@ -96,14 +88,15 @@ function Profile() {
               id: doc.id,
               eventId: eventDoc.id,
               eventTitle: eventsMap.get(eventDoc.id) || 'Unknown Event',
-              ...doc.data(),
-            } as Post);
+              mediaUrl: doc.data().mediaUrl,
+              type: doc.data().type as 'photo' | 'video',
+              createdAt: doc.data().createdAt,
+            });
           });
         }
-        userPosts.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
         setPosts(userPosts);
-      } catch (err) {
-        setError('Failed to load profile data. Please try again.');
+      } catch (err: any) {
+        setError('Failed to load profile data: ' + err.message);
         console.error('Error fetching profile:', err);
       } finally {
         setLoading(false);
@@ -125,12 +118,13 @@ function Profile() {
   };
 
   const handleSave = async () => {
+    if (!currentUser) return;
     setLoading(true);
     setError(null);
     try {
       let updatedPhotoURL = userData.photoURL;
       if (photoFile) {
-        const storageRef = ref(storage, `profilePhotos/${currentUser!.uid}/${photoFile.name}`);
+        const storageRef = ref(storage, `profilePhotos/${currentUser.uid}/${photoFile.name}`);
         await uploadBytes(storageRef, photoFile);
         updatedPhotoURL = await getDownloadURL(storageRef);
       }
@@ -140,7 +134,7 @@ function Profile() {
         photoURL: updatedPhotoURL,
       });
 
-      const userDoc = doc(db, 'users', currentUser!.uid);
+      const userDoc = doc(db, 'users', currentUser.uid);
       await updateDoc(userDoc, {
         displayName: userData.displayName,
         bio: userData.bio,
@@ -151,8 +145,8 @@ function Profile() {
       setUserData((prev) => ({ ...prev, photoURL: updatedPhotoURL }));
       setPhotoFile(null);
       setEditing(false);
-    } catch (err) {
-      setError('Failed to update profile. Please try again.');
+    } catch (err: any) {
+      setError('Failed to update profile: ' + err.message);
       console.error('Error updating profile:', err);
     } finally {
       setLoading(false);
@@ -166,8 +160,8 @@ function Profile() {
     try {
       await deleteDoc(doc(db, 'events', eventId));
       setEvents((prev) => prev.filter((event) => event.id !== eventId));
-    } catch (err) {
-      setError('Failed to delete event. Please try again.');
+    } catch (err: any) {
+      setError('Failed to delete event: ' + err.message);
       console.error('Error deleting event:', err);
     } finally {
       setLoading(false);
@@ -181,8 +175,8 @@ function Profile() {
     try {
       await deleteDoc(doc(db, 'events', eventId, 'posts', postId));
       setPosts((prev) => prev.filter((post) => post.id !== postId));
-    } catch (err) {
-      setError('Failed to delete post. Please try again.');
+    } catch (err: any) {
+      setError('Failed to delete post: ' + err.message);
       console.error('Error deleting post:', err);
     } finally {
       setLoading(false);
@@ -227,7 +221,6 @@ function Profile() {
         animate="visible"
         variants={fadeIn}
       >
-        {/* Profile Header */}
         <motion.div className="flex items-center space-x-6" variants={fadeIn}>
           {userData.photoURL ? (
             <img
@@ -283,7 +276,6 @@ function Profile() {
           </button>
         </motion.div>
 
-        {/* Bio and Location */}
         <motion.div className="mt-6 space-y-4" variants={fadeIn}>
           <div>
             <h2 className="text-xl font-semibold text-accent-gold">Bio</h2>
@@ -331,14 +323,12 @@ function Profile() {
           </div>
         </motion.div>
 
-        {/* Error Message */}
         {error && (
           <motion.p className="mt-4 text-center text-red-500" variants={fadeIn}>
             {error}
           </motion.p>
         )}
 
-        {/* Events */}
         <motion.section className="mt-8" variants={staggerChildren}>
           <h2 className="text-xl font-semibold text-accent-gold mb-4">Your Events</h2>
           {events.length > 0 ? (
@@ -376,7 +366,6 @@ function Profile() {
           )}
         </motion.section>
 
-        {/* Posts */}
         <motion.section className="mt-8" variants={staggerChildren}>
           <h2 className="text-xl font-semibold text-accent-gold mb-4">Your Posts</h2>
           {posts.length > 0 ? (

@@ -1,44 +1,60 @@
-// src/context/AuthContext.tsx
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { onAuthStateChanged, User } from 'firebase/auth';
-import { auth, loginUser, registerUser, logoutUser } from '../services/firebase'; // Import initialized auth and functions
+import { auth, loginUser, registerUser, logoutUser, getUserData } from '../services/firebase'; // Added getUserData
 import { toast } from 'react-toastify';
 
-// Define the shape of the context value with TypeScript
 interface AuthContextType {
   currentUser: User | null;
   loading: boolean;
   error: string | null;
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
-  register: (email: string, password: string) => Promise<void>;
+  register: (email: string, password: string, displayName?: string) => Promise<void>; // Added displayName
   userProfile: { name?: string; profilePicture?: string } | null;
 }
 
-// Create AuthContext
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true); // Start as true for initial load
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [userProfile, setUserProfile] = useState<{ name?: string; profilePicture?: string } | null>(null);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setCurrentUser(user);
+      if (user) {
+        try {
+          const userData = await getUserData(user.uid);
+          setUserProfile({
+            name: userData?.displayName || user.displayName || user.email?.split('@')[0],
+            profilePicture: userData?.profilePicture || user.photoURL || undefined,
+          });
+        } catch (err: any) {
+          console.error('Error fetching user profile:', err);
+          setError('Failed to load user profile: ' + err.message);
+        }
+      } else {
+        setUserProfile(null);
+      }
       setLoading(false);
     });
 
-    return () => unsubscribe(); // Cleanup subscription
+    return () => unsubscribe();
   }, []);
 
-  // Login function using firebase.ts export
   const login = async (email: string, password: string) => {
     setLoading(true);
     setError(null);
     try {
-      await loginUser(email, password); // Use exported function
+      const user = await loginUser(email, password);
+      setCurrentUser(user); // Update currentUser immediately
+      const userData = await getUserData(user.uid);
+      setUserProfile({
+        name: userData?.displayName || user.displayName || user.email?.split('@')[0],
+        profilePicture: userData?.profilePicture || user.photoURL || undefined,
+      });
       toast.success('Logged in successfully!');
     } catch (err: any) {
       setError(err.message);
@@ -48,12 +64,16 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }
   };
 
-  // Register function using firebase.ts export
-  const register = async (email: string, password: string) => {
+  const register = async (email: string, password: string, displayName?: string) => {
     setLoading(true);
     setError(null);
     try {
-      await registerUser(email, password); // Use exported function
+      const user = await registerUser(email, password, displayName);
+      setCurrentUser(user); // Update currentUser immediately
+      setUserProfile({
+        name: displayName || user.displayName || user.email?.split('@')[0],
+        profilePicture: user.photoURL || undefined,
+      });
       toast.success('Registered successfully!');
     } catch (err: any) {
       setError(err.message);
@@ -63,12 +83,13 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }
   };
 
-  // Logout function using firebase.ts export
   const logout = async () => {
     setLoading(true);
     setError(null);
     try {
-      await logoutUser(); // Use exported function
+      await logoutUser();
+      setCurrentUser(null); // Clear currentUser immediately
+      setUserProfile(null); // Clear userProfile
       toast.success('Logged out successfully!');
     } catch (err: any) {
       setError(err.message);
@@ -80,7 +101,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
   return (
     <AuthContext.Provider value={{ currentUser, loading, error, login, logout, register, userProfile }}>
-      {children}
+      {!loading && children} {/* Only render children when not loading */}
     </AuthContext.Provider>
   );
 };

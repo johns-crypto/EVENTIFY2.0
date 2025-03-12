@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { motion } from 'framer-motion';
-import { FaEnvelope, FaLock, FaGoogle, FaFacebook } from 'react-icons/fa'; // Icons
+import { FaEnvelope, FaLock, FaGoogle, FaFacebook } from 'react-icons/fa';
 import { sendPasswordResetEmail, GoogleAuthProvider, FacebookAuthProvider, signInWithPopup } from 'firebase/auth';
 import { auth } from '../services/firebase';
 
@@ -52,9 +52,12 @@ function Login() {
     setErrors({ email: '', password: '', general: '' });
 
     try {
+      console.log('Attempting login with:', formData);
       await login(formData.email, formData.password);
+      console.log('Login successful');
       navigate('/events');
     } catch (err: any) {
+      console.error('Login error:', err);
       setErrors({
         email: '',
         password: '',
@@ -75,7 +78,7 @@ function Login() {
     try {
       await sendPasswordResetEmail(auth, formData.email);
       setResetSent(true);
-      setTimeout(() => setResetSent(false), 5000); // Hide message after 5s
+      setTimeout(() => setResetSent(false), 5000);
     } catch (err: any) {
       setErrors({ ...errors, general: err.message || 'Failed to send reset email.' });
     } finally {
@@ -87,18 +90,20 @@ function Login() {
     setLoading(true);
     setErrors({ email: '', password: '', general: '' });
     try {
+      console.log(`Attempting ${providerType} login`);
       const provider =
         providerType === 'google' ? new GoogleAuthProvider() : new FacebookAuthProvider();
-      await signInWithPopup(auth, provider);
+      const result = await signInWithPopup(auth, provider);
+      console.log(`${providerType} login successful:`, result.user);
       navigate('/events');
     } catch (err: any) {
+      console.error(`${providerType} login error:`, err);
       setErrors({ ...errors, general: err.message || `Failed to login with ${providerType}.` });
     } finally {
       setLoading(false);
     }
   };
 
-  // Animation variants
   const fadeIn = {
     hidden: { opacity: 0, y: 20 },
     visible: { opacity: 1, y: 0, transition: { duration: 0.6 } },
@@ -120,7 +125,6 @@ function Login() {
         </motion.p>
 
         <form onSubmit={handleSubmit} className="space-y-6">
-          {/* Email Field */}
           <motion.div variants={fadeIn}>
             <label htmlFor="email" className="block text-sm font-medium text-neutral-lightGray">
               Email
@@ -136,6 +140,7 @@ function Login() {
                 className="w-full pl-10 p-3 rounded bg-neutral-offWhite text-neutral-darkGray focus:outline-none focus:ring-2 focus:ring-secondary-deepRed"
                 disabled={loading}
                 aria-describedby={errors.email ? 'email-error' : undefined}
+                autoComplete="email" // Added
               />
             </div>
             {errors.email && (
@@ -145,7 +150,6 @@ function Login() {
             )}
           </motion.div>
 
-          {/* Password Field */}
           <motion.div variants={fadeIn}>
             <label htmlFor="password" className="block text-sm font-medium text-neutral-lightGray">
               Password
@@ -161,6 +165,7 @@ function Login() {
                 className="w-full pl-10 p-3 rounded bg-neutral-offWhite text-neutral-darkGray focus:outline-none focus:ring-2 focus:ring-secondary-deepRed"
                 disabled={loading}
                 aria-describedby={errors.password ? 'password-error' : undefined}
+                autoComplete="current-password" // Added
               />
             </div>
             {errors.password && (
@@ -170,7 +175,6 @@ function Login() {
             )}
           </motion.div>
 
-          {/* General Error or Reset Success */}
           {errors.general && (
             <motion.p className="text-center text-red-500" variants={fadeIn}>
               {errors.general}
@@ -182,7 +186,6 @@ function Login() {
             </motion.p>
           )}
 
-          {/* Submit Button */}
           <motion.div variants={fadeIn}>
             <button
               type="submit"
@@ -217,7 +220,6 @@ function Login() {
           </motion.div>
         </form>
 
-        {/* Social Login Buttons */}
         <motion.div className="mt-6 space-y-4" variants={fadeIn}>
           <button
             onClick={() => handleSocialLogin('google')}
@@ -237,7 +239,6 @@ function Login() {
           </button>
         </motion.div>
 
-        {/* Additional Links */}
         <motion.div className="mt-6 text-center space-y-2" variants={fadeIn}>
           <p className="text-sm text-neutral-lightGray">
             Don’t have an account?{' '}

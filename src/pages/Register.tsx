@@ -15,7 +15,7 @@ import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { auth, db, storage } from '../services/firebase';
 
 function Register() {
-  const { register } = useAuth(); // Assumes register method in context
+  const { register } = useAuth();
   const navigate = useNavigate();
   const [formData, setFormData] = useState({
     email: '',
@@ -82,29 +82,28 @@ function Register() {
     setErrors({ email: '', password: '', displayName: '', general: '' });
 
     try {
-      // Register user with email/password
-      const userCredential = await createUserWithEmailAndPassword(
-        auth,
-        formData.email,
-        formData.password
-      );
-      const user = userCredential.user;
+      console.log('Attempting registration with:', formData);
+      // Use AuthContext's register instead of direct Firebase call for consistency
+      await register(formData.email, formData.password, formData.displayName);
+
+      const user = auth.currentUser;
+      if (!user) throw new Error('User not found after registration');
 
       // Upload photo if provided
       let photoURL = '';
       if (photoFile) {
         const storageRef = ref(storage, `profilePhotos/${user.uid}/${photoFile.name}`);
+        console.log('Uploading photo to:', storageRef.fullPath);
         await uploadBytes(storageRef, photoFile);
         photoURL = await getDownloadURL(storageRef);
+        console.log('Photo URL:', photoURL);
+
+        // Update Firebase Auth profile with photo
+        await updateProfile(user, { photoURL });
       }
 
-      // Update Firebase Auth profile
-      await updateProfile(user, {
-        displayName: formData.displayName,
-        photoURL: photoURL || '',
-      });
-
       // Save additional data to Firestore
+      console.log('Saving user data to Firestore');
       await setDoc(doc(db, 'users', user.uid), {
         displayName: formData.displayName,
         bio: formData.bio || '',
@@ -112,11 +111,10 @@ function Register() {
         photoURL: photoURL || '',
       });
 
-      // Optionally call register from context if it does additional setup
-      await register(formData.email, formData.password);
-
+      console.log('Registration successful');
       navigate('/events');
     } catch (err: any) {
+      console.error('Registration error:', err);
       setErrors({
         email: '',
         password: '',
@@ -132,10 +130,12 @@ function Register() {
     setLoading(true);
     setErrors({ email: '', password: '', displayName: '', general: '' });
     try {
+      console.log(`Attempting ${providerType} registration`);
       const provider =
         providerType === 'google' ? new GoogleAuthProvider() : new FacebookAuthProvider();
       const result = await signInWithPopup(auth, provider);
       const user = result.user;
+      console.log(`${providerType} registration successful:`, user);
 
       // Save user data to Firestore (only if new user)
       const userDoc = await getDoc(doc(db, 'users', user.uid));
@@ -146,10 +146,12 @@ function Register() {
           location: '',
           photoURL: user.photoURL || '',
         });
+        console.log('Saved social user data to Firestore');
       }
 
       navigate('/events');
     } catch (err: any) {
+      console.error(`${providerType} registration error:`, err);
       setErrors({
         email: '',
         password: '',
@@ -182,7 +184,6 @@ function Register() {
         </motion.p>
 
         <form onSubmit={handleSubmit} className="space-y-6">
-          {/* Email Field */}
           <motion.div variants={fadeIn}>
             <label htmlFor="email" className="block text-sm font-medium text-neutral-lightGray">
               Email
@@ -199,6 +200,7 @@ function Register() {
                 placeholder="you@example.com"
                 disabled={loading}
                 aria-describedby={errors.email ? 'email-error' : undefined}
+                autoComplete="email" // Added
               />
             </div>
             {errors.email && (
@@ -208,7 +210,6 @@ function Register() {
             )}
           </motion.div>
 
-          {/* Password Field */}
           <motion.div variants={fadeIn}>
             <label htmlFor="password" className="block text-sm font-medium text-neutral-lightGray">
               Password
@@ -225,6 +226,7 @@ function Register() {
                 placeholder="••••••"
                 disabled={loading}
                 aria-describedby={errors.password ? 'password-error' : undefined}
+                autoComplete="new-password" // Added
               />
             </div>
             {errors.password && (
@@ -234,7 +236,6 @@ function Register() {
             )}
           </motion.div>
 
-          {/* Display Name Field */}
           <motion.div variants={fadeIn}>
             <label htmlFor="displayName" className="block text-sm font-medium text-neutral-lightGray">
               Name
@@ -251,6 +252,7 @@ function Register() {
                 placeholder="Your Name"
                 disabled={loading}
                 aria-describedby={errors.displayName ? 'name-error' : undefined}
+                autoComplete="name" // Added
               />
             </div>
             {errors.displayName && (
@@ -260,7 +262,6 @@ function Register() {
             )}
           </motion.div>
 
-          {/* Bio Field */}
           <motion.div variants={fadeIn}>
             <label htmlFor="bio" className="block text-sm font-medium text-neutral-lightGray">
               Bio (Optional)
@@ -277,7 +278,6 @@ function Register() {
             />
           </motion.div>
 
-          {/* Location Field */}
           <motion.div variants={fadeIn}>
             <label htmlFor="location" className="block text-sm font-medium text-neutral-lightGray">
               Location (Optional)
@@ -291,10 +291,10 @@ function Register() {
               className="w-full mt-1 p-3 rounded bg-neutral-offWhite text-neutral-darkGray focus:outline-none focus:ring-2 focus:ring-secondary-deepRed"
               placeholder="e.g., New York, NY"
               disabled={loading}
+              autoComplete="address-level2" // Added (city-level location)
             />
           </motion.div>
 
-          {/* Photo Upload */}
           <motion.div variants={fadeIn}>
             <label htmlFor="photoUpload" className="block text-sm font-medium text-neutral-lightGray">
               Profile Photo (Optional)
@@ -313,14 +313,12 @@ function Register() {
             {photoFile && <p className="mt-2 text-sm text-neutral-lightGray">Photo selected</p>}
           </motion.div>
 
-          {/* General Error */}
           {errors.general && (
             <motion.p className="text-center text-red-500" variants={fadeIn}>
               {errors.general}
             </motion.p>
           )}
 
-          {/* Submit Button */}
           <motion.div variants={fadeIn}>
             <button
               type="submit"
@@ -355,7 +353,6 @@ function Register() {
           </motion.div>
         </form>
 
-        {/* Social Login */}
         <motion.div className="mt-6 space-y-4" variants={fadeIn}>
           <button
             onClick={() => handleSocialLogin('google')}
@@ -375,7 +372,6 @@ function Register() {
           </button>
         </motion.div>
 
-        {/* Login Link */}
         <motion.div className="mt-6 text-center" variants={fadeIn}>
           <p className="text-sm text-neutral-lightGray">
             Already have an account?{' '}
