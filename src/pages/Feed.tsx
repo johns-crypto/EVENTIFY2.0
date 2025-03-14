@@ -114,6 +114,7 @@ function Feed() {
               ) : (
                 <video src={post.mediaUrl} controls className="w-full h-64 rounded" />
               )}
+              <p className="mt-2 font-semibold text-accent-gold">{post.eventTitle || 'Unknown Event'}</p>
               <div className="flex justify-between items-center mt-2">
                 <button
                   className="flex items-center space-x-1"
@@ -121,7 +122,7 @@ function Feed() {
                   disabled={!currentUser}
                 >
                   <FaHeart
-                    className={post.likes.includes(currentUser?.uid || '') ? 'text-red-600' : 'text-gray-400'}
+                    className={currentUser && post.likes.includes(currentUser.uid) ? 'text-red-600' : 'text-gray-400'}
                   />
                   <span>{post.likes.length}</span>
                 </button>

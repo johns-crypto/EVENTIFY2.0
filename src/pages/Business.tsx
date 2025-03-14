@@ -1,447 +1,308 @@
-import { useEffect, useState } from 'react';
-import { useLocation } from 'react-router-dom';
-import { collection, getDocs, addDoc, doc, updateDoc } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { db, storage, getBusinesses, BusinessData, ProductData } from '../services/firebase'; // Updated imports
+import { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { FaImage } from 'react-icons/fa';
-import { motion } from 'framer-motion'; // Added for animations
+import { db, storage, getBusinesses } from '../services/firebase';
+import { collection, addDoc, doc, updateDoc } from 'firebase/firestore';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { motion } from 'framer-motion';
+import { FaSave, FaPlus, FaTrash } from 'react-icons/fa';
+import { useNavigate } from 'react-router-dom';
+import { toast } from 'react-toastify';
 
 type Category = 'Refreshments' | 'Catering/Food' | 'Venue Provider';
 
+interface Product {
+  name: string;
+  description: string;
+  imageUrl?: string;
+  inStock: boolean;
+  file?: File; // For new products being added
+}
+
 function Business() {
   const { currentUser } = useAuth();
-  const location = useLocation();
-  const [businesses, setBusinesses] = useState<BusinessData[]>([]);
-  const [filteredBusinesses, setFilteredBusinesses] = useState<BusinessData[]>([]);
-  const [newBusiness, setNewBusiness] = useState({
+  const navigate = useNavigate();
+  const [businessId, setBusinessId] = useState<string | null>(null);
+  const [name, setName] = useState<string>('');
+  const [category, setCategory] = useState<Category>('Refreshments'); // Default to a valid Category
+  const [description, setDescription] = useState<string>('');
+  const [products, setProducts] = useState<Product[]>([]);
+  const [newProduct, setNewProduct] = useState<Product>({
     name: '',
-    category: 'Refreshments' as Category,
     description: '',
-    products: [] as ProductData[],
+    inStock: true,
   });
-  const [newProduct, setNewProduct] = useState({ name: '', description: '', image: null as File | null, inStock: true });
-  const [editingBusiness, setEditingBusiness] = useState<BusinessData | null>(null);
-  const [loading, setLoading] = useState(true); // Added loading state
-  const [error, setError] = useState<string | null>(null); // Added error state
-
-  const fadeIn = {
-    hidden: { opacity: 0, y: 20 },
-    visible: { opacity: 1, y: 0, transition: { duration: 0.6 } },
-  };
-
-  const stagger = {
-    visible: { transition: { staggerChildren: 0.2 } },
-  };
+  const [loading, setLoading] = useState<boolean>(true);
 
   useEffect(() => {
-    fetchBusinesses();
-  }, []);
-
-  useEffect(() => {
-    const params = new URLSearchParams(location.search);
-    const category = params.get('category') as Category | null;
-    if (category) {
-      setFilteredBusinesses(businesses.filter((b) => b.category === category));
-    } else {
-      setFilteredBusinesses(businesses);
+    if (!currentUser) {
+      navigate('/login');
+      return;
     }
-  }, [location.search, businesses]);
-
-  const fetchBusinesses = async () => {
     setLoading(true);
-    setError(null);
+    getBusinesses()
+      .then((businesses) => {
+        const userBusiness = businesses.find((b) => b.ownerId === currentUser.uid);
+        if (userBusiness) {
+          setBusinessId(userBusiness.id);
+          setName(userBusiness.name);
+          setCategory(userBusiness.category as Category); // Ensure it matches Category type
+          setDescription(userBusiness.description);
+          setProducts(userBusiness.products);
+        }
+      })
+      .catch((err) => toast.error('Failed to load business: ' + err.message))
+      .finally(() => setLoading(false));
+  }, [currentUser, navigate]);
+
+  const handleSaveBusiness = async () => {
+    if (!currentUser || !name || !category) {
+      toast.error('Please fill in all required fields.');
+      return;
+    }
+    setLoading(true);
     try {
-      const businessData = await getBusinesses();
-      setBusinesses(businessData);
+      const businessData = {
+        name,
+        category,
+        description,
+        ownerId: currentUser.uid,
+        products,
+      };
+      if (businessId) {
+        await updateDoc(doc(db, 'businesses', businessId), businessData);
+        toast.success('Business updated!');
+      } else {
+        const docRef = await addDoc(collection(db, 'businesses'), businessData);
+        setBusinessId(docRef.id);
+        toast.success('Business created!');
+      }
+      navigate('/business-profile');
     } catch (err: any) {
-      setError('Failed to fetch businesses: ' + err.message);
-      console.error('Error fetching businesses:', err);
+      toast.error('Failed to save business: ' + err.message);
     } finally {
       setLoading(false);
     }
   };
 
   const handleAddProduct = async () => {
-    if (!newProduct.name || !newProduct.image) {
-      setError('Product name and image are required.');
+    if (!newProduct.name || !newProduct.description) {
+      toast.error('Product name and description are required.');
       return;
     }
     setLoading(true);
-    setError(null);
     try {
-      const storageRef = ref(storage, `products/${newProduct.image.name}-${Date.now()}`);
-      await uploadBytes(storageRef, newProduct.image);
-      const imageUrl = await getDownloadURL(storageRef);
-      setNewBusiness({
-        ...newBusiness,
-        products: [...newBusiness.products, { ...newProduct, imageUrl }],
-      });
-      setNewProduct({ name: '', description: '', image: null, inStock: true });
+      let imageUrl = newProduct.imageUrl;
+      if (newProduct.file) {
+        const storageRef = ref(storage, `products/${currentUser!.uid}/${Date.now()}_${newProduct.file.name}`);
+        await uploadBytes(storageRef, newProduct.file);
+        imageUrl = await getDownloadURL(storageRef);
+      }
+      const updatedProduct = { ...newProduct, imageUrl, file: undefined };
+      const updatedProducts = [...products, updatedProduct];
+      setProducts(updatedProducts);
+      setNewProduct({ name: '', description: '', inStock: true });
+      if (businessId) {
+        await updateDoc(doc(db, 'businesses', businessId), { products: updatedProducts });
+      }
+      toast.success('Product added!');
     } catch (err: any) {
-      setError('Failed to add product: ' + err.message);
-      console.error('Error adding product:', err);
+      toast.error('Failed to add product: ' + err.message);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleRegister = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!currentUser) {
-      setError('Please log in to register a business.');
-      return;
-    }
-    setLoading(true);
-    setError(null);
+  const handleDeleteProduct = async (index: number) => {
+    if (!businessId) return;
+    const updatedProducts = products.filter((_, i) => i !== index);
+    setProducts(updatedProducts);
     try {
-      await addDoc(collection(db, 'businesses'), {
-        ...newBusiness,
-        ownerId: currentUser.uid,
-      });
-      setNewBusiness({ name: '', category: 'Refreshments', description: '', products: [] });
-      await fetchBusinesses();
+      await updateDoc(doc(db, 'businesses', businessId), { products: updatedProducts });
+      toast.success('Product deleted!');
     } catch (err: any) {
-      setError('Failed to register business: ' + err.message);
-      console.error('Error registering business:', err);
-    } finally {
-      setLoading(false);
+      toast.error('Failed to delete product: ' + err.message);
     }
   };
 
-  const handleUpdate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!editingBusiness || !currentUser || editingBusiness.ownerId !== currentUser.uid) {
-      setError('Unauthorized or invalid business data.');
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const businessRef = doc(db, 'businesses', editingBusiness.id);
-      await updateDoc(businessRef, {
-        name: editingBusiness.name,
-        category: editingBusiness.category,
-        description: editingBusiness.description,
-        products: editingBusiness.products,
-      });
-      setEditingBusiness(null);
-      await fetchBusinesses();
-    } catch (err: any) {
-      setError('Failed to update business: ' + err.message);
-      console.error('Error updating business:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const fadeIn = { hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 0, transition: { duration: 0.6 } } };
+  const stagger = { visible: { transition: { staggerChildren: 0.1 } } };
 
-  const getCategoryColor = (category: Category) => {
-    switch (category) {
-      case 'Refreshments': return 'bg-refreshments-lightBlue';
-      case 'Catering/Food': return 'bg-catering-orange';
-      case 'Venue Provider': return 'bg-venue-green';
-      default: return 'bg-gray-500';
-    }
-  };
-
-  if (loading) {
+  if (loading)
     return (
       <div className="min-h-screen bg-neutral-darkGray flex items-center justify-center">
-        <svg
-          className="animate-spin h-8 w-8 text-accent-gold"
-          xmlns="http://www.w3.org/2000/svg"
-          fill="none"
-          viewBox="0 0 24 24"
-        >
-          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+        <svg className="animate-spin h-8 w-8 text-accent-gold" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25" />
           <path
-            className="opacity-75"
             fill="currentColor"
             d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+            className="opacity-75"
           />
         </svg>
       </div>
     );
-  }
 
   return (
-    <div className="min-h-screen bg-neutral-darkGray text-neutral-lightGray">
-      <motion.section
-        className="bg-primary-navy p-6"
-        initial="hidden"
-        animate="visible"
-        variants={fadeIn}
-      >
-        <div className="container mx-auto">
-          <h1 className="text-4xl font-bold text-accent-gold">Business Directory</h1>
-          <p className="text-lg mt-2">Explore and connect with our registered businesses.</p>
-        </div>
-      </motion.section>
-
-      <motion.section
-        className="container mx-auto p-6"
+    <div className="min-h-screen bg-neutral-darkGray py-12 px-4 sm:px-6 lg:px-8">
+      <motion.div
+        className="max-w-4xl mx-auto bg-primary-navy p-8 rounded-lg shadow-lg"
         initial="hidden"
         animate="visible"
         variants={stagger}
       >
-        <h2 className="text-2xl font-bold text-accent-gold mb-4">Registered Businesses</h2>
-        {error && <p className="text-red-500 mb-4">{error}</p>}
-        <motion.div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" variants={stagger}>
-          {filteredBusinesses.map((business) => (
-            <motion.div
-              key={business.id}
-              className="bg-neutral-offWhite text-neutral-darkGray p-4 rounded shadow"
-              variants={fadeIn}
-            >
-              <div className={`${getCategoryColor(business.category)} h-2 rounded-t`}></div>
-              <h3 className="text-xl font-semibold mt-2">{business.name}</h3>
-              <p className="text-sm">{business.category}</p>
-              <p>{business.description}</p>
-              <h4 className="text-lg font-semibold mt-4">Products/Services</h4>
-              <div className="grid grid-cols-1 gap-4 mt-2">
-                {business.products.map((product, index) => (
-                  <div key={index} className="bg-white p-3 rounded flex items-center space-x-4">
-                    {product.imageUrl ? (
-                      <img src={product.imageUrl} alt={product.name} className="w-16 h-16 object-cover rounded" />
-                    ) : (
-                      <FaImage className="w-16 h-16 text-gray-400" />
-                    )}
-                    <div>
-                      <h5 className="font-semibold">{product.name}</h5>
-                      <p className="text-sm">{product.description}</p>
-                      <span
-                        className={`text-sm ${product.inStock ? 'text-green-600' : 'text-red-600'}`}
-                      >
-                        {product.inStock ? 'In Stock' : 'Out of Stock'}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              {currentUser && business.ownerId === currentUser.uid && (
-                <button
-                  className="mt-4 bg-secondary-deepRed text-neutral-lightGray px-4 py-2 rounded hover:bg-secondary-darkRed"
-                  onClick={() => setEditingBusiness(business)}
-                  disabled={loading}
-                >
-                  Edit
-                </button>
-              )}
-            </motion.div>
-          ))}
-        </motion.div>
-      </motion.section>
+        <h1 className="text-3xl font-bold text-accent-gold mb-6">
+          {businessId ? 'Manage Your Business' : 'Create a Business'}
+        </h1>
 
-      {currentUser && (
-        <motion.section
-          className="container mx-auto p-6"
-          initial="hidden"
-          animate="visible"
-          variants={fadeIn}
-        >
-          <h2 className="text-2xl font-bold text-accent-gold mb-4">Register Your Business</h2>
-          {error && <p className="text-red-500 mb-4">{error}</p>}
-          <form onSubmit={handleRegister} className="space-y-4 max-w-md">
-            <div>
-              <label htmlFor="business-name" className="block text-sm font-medium text-neutral-lightGray">Business Name</label>
-              <input
-                id="business-name"
-                type="text"
-                value={newBusiness.name}
-                onChange={(e) => setNewBusiness({ ...newBusiness, name: e.target.value })}
-                placeholder="Business Name"
-                className="w-full p-2 rounded bg-neutral-offWhite text-neutral-darkGray"
-                required
-                aria-label="Business Name"
-              />
-            </div>
-            <div>
-              <label htmlFor="business-category" className="block text-sm font-medium text-neutral-lightGray">Category</label>
-              <select
-                id="business-category"
-                value={newBusiness.category}
-                onChange={(e) => setNewBusiness({ ...newBusiness, category: e.target.value as Category })}
-                className="w-full p-2 rounded bg-neutral-offWhite text-neutral-darkGray"
-                aria-label="Business Category"
-              >
-                <option value="Refreshments">Refreshments</option>
-                <option value="Catering/Food">Catering/Food</option>
-                <option value="Venue Provider">Venue Provider</option>
-              </select>
-            </div>
-            <div>
-              <label htmlFor="business-description" className="block text-sm font-medium text-neutral-lightGray">Description</label>
-              <textarea
-                id="business-description"
-                value={newBusiness.description}
-                onChange={(e) => setNewBusiness({ ...newBusiness, description: e.target.value })}
-                placeholder="Description"
-                className="w-full p-2 rounded bg-neutral-offWhite text-neutral-darkGray"
-                rows={3}
-                aria-label="Business Description"
-              />
-            </div>
-            <div className="space-y-2">
-              <label htmlFor="product-name" className="block text-sm font-medium text-neutral-lightGray">Product Name</label>
-              <input
-                id="product-name"
-                type="text"
-                value={newProduct.name}
-                onChange={(e) => setNewProduct({ ...newProduct, name: e.target.value })}
-                placeholder="Product Name"
-                className="w-full p-2 rounded bg-neutral-offWhite text-neutral-darkGray"
-                aria-label="Product Name"
-              />
-              <label htmlFor="product-description" className="block text-sm font-medium text-neutral-lightGray">Product Description</label>
-              <textarea
-                id="product-description"
-                value={newProduct.description}
-                onChange={(e) => setNewProduct({ ...newProduct, description: e.target.value })}
-                placeholder="Product Description"
-                className="w-full p-2 rounded bg-neutral-offWhite text-neutral-darkGray"
-                rows={2}
-                aria-label="Product Description"
-              />
-              <label htmlFor="product-image" className="block text-sm font-medium text-neutral-lightGray">Product Image</label>
-              <input
-                id="product-image"
-                type="file"
-                accept="image/*"
-                onChange={(e) => setNewProduct({ ...newProduct, image: e.target.files?.[0] || null })}
-                className="w-full p-2"
-                aria-label="Product Image"
-              />
-              <label className="flex items-center space-x-2">
-                <input
-                  type="checkbox"
-                  checked={newProduct.inStock}
-                  onChange={(e) => setNewProduct({ ...newProduct, inStock: e.target.checked })}
-                />
-                <span>In Stock</span>
-              </label>
+        <motion.div className="space-y-4 mb-6" variants={fadeIn}>
+          <div>
+            <label htmlFor="nameInput" className="block text-sm text-neutral-lightGray mb-1">
+              Business Name
+            </label>
+            <input
+              id="nameInput"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="w-full p-3 rounded bg-neutral-offWhite text-neutral-darkGray"
+              placeholder="Enter business name"
+              disabled={loading}
+            />
+          </div>
+          <div>
+            <label htmlFor="categorySelect" className="block text-sm text-neutral-lightGray mb-1">
+              Category
+            </label>
+            <select
+              id="categorySelect"
+              value={category}
+              onChange={(e) => setCategory(e.target.value as Category)}
+              className="w-full p-3 rounded bg-neutral-offWhite text-neutral-darkGray"
+              disabled={loading}
+            >
+              <option value="Refreshments">Refreshments</option>
+              <option value="Catering/Food">Catering/Food</option>
+              <option value="Venue Provider">Venue Provider</option>
+            </select>
+          </div>
+          <div>
+            <label htmlFor="descriptionTextarea" className="block text-sm text-neutral-lightGray mb-1">
+              Description
+            </label>
+            <textarea
+              id="descriptionTextarea"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              className="w-full p-3 rounded bg-neutral-offWhite text-neutral-darkGray"
+              rows={4}
+              placeholder="Describe your business"
+              disabled={loading}
+            />
+          </div>
+          <button
+            onClick={handleSaveBusiness}
+            className="w-full p-3 bg-accent-gold text-neutral-darkGray rounded hover:bg-yellow-600 flex items-center justify-center disabled:opacity-50"
+            disabled={loading}
+          >
+            <FaSave className="mr-2" />
+            {businessId ? 'Update Business' : 'Create Business'}
+          </button>
+        </motion.div>
+
+        <motion.div className="space-y-4" variants={fadeIn}>
+          <h2 className="text-xl font-semibold text-accent-gold mb-4">Products</h2>
+          {products.map((product, index) => (
+            <div
+              key={index}
+              className="bg-neutral-offWhite p-4 rounded-lg flex items-center justify-between"
+            >
+              <div>
+                {product.imageUrl && (
+                  <img src={product.imageUrl} alt={product.name} className="w-20 h-20 object-cover rounded mr-4" />
+                )}
+                <div>
+                  <h3 className="text-lg font-semibold text-accent-gold">{product.name}</h3>
+                  <p className="text-neutral-darkGray">{product.description}</p>
+                  <p className="text-sm text-neutral-darkGray">
+                    {product.inStock ? 'In Stock' : 'Out of Stock'}
+                  </p>
+                </div>
+              </div>
               <button
-                type="button"
-                onClick={handleAddProduct}
-                className="w-full bg-secondary-deepRed text-neutral-lightGray p-2 rounded hover:bg-secondary-darkRed"
+                onClick={() => handleDeleteProduct(index)}
+                className="text-red-500 hover:text-red-700"
+                aria-label={`Delete ${product.name}`}
                 disabled={loading}
               >
-                Add Product
+                <FaTrash size={20} />
               </button>
             </div>
-            <button
-              type="submit"
-              className="w-full bg-secondary-deepRed text-neutral-lightGray p-2 rounded hover:bg-secondary-darkRed"
-              disabled={loading}
-            >
-              {loading ? 'Registering...' : 'Register'}
-            </button>
-          </form>
-        </motion.section>
-      )}
+          ))}
 
-      {editingBusiness && currentUser && editingBusiness.ownerId === currentUser.uid && (
-        <motion.section
-          className="container mx-auto p-6"
-          initial="hidden"
-          animate="visible"
-          variants={fadeIn}
-        >
-          <h2 className="text-2xl font-bold text-accent-gold mb-4">Edit Business</h2>
-          {error && <p className="text-red-500 mb-4">{error}</p>}
-          <form onSubmit={handleUpdate} className="space-y-4 max-w-md">
+          <h3 className="text-lg font-semibold text-accent-gold mt-6">Add New Product</h3>
+          <div className="space-y-4">
             <div>
-              <label htmlFor="edit-business-name" className="block text-sm font-medium text-neutral-lightGray">Business Name</label>
+              <label htmlFor="productNameInput" className="block text-sm text-neutral-lightGray mb-1">
+                Product Name
+              </label>
               <input
-                id="edit-business-name"
-                type="text"
-                value={editingBusiness.name}
-                onChange={(e) => setEditingBusiness({ ...editingBusiness, name: e.target.value })}
-                placeholder="Business Name"
-                className="w-full p-2 rounded bg-neutral-offWhite text-neutral-darkGray"
-                required
-                aria-label="Business Name"
+                id="productNameInput"
+                value={newProduct.name}
+                onChange={(e) => setNewProduct({ ...newProduct, name: e.target.value })}
+                className="w-full p-3 rounded bg-neutral-offWhite text-neutral-darkGray"
+                placeholder="Enter product name"
+                disabled={loading}
               />
             </div>
             <div>
-              <label htmlFor="edit-business-category" className="block text-sm font-medium text-neutral-lightGray">Category</label>
-              <select
-                id="edit-business-category"
-                value={editingBusiness.category}
-                onChange={(e) => setEditingBusiness({ ...editingBusiness, category: e.target.value as Category })}
-                className="w-full p-2 rounded bg-neutral-offWhite text-neutral-darkGray"
-                aria-label="Business Category"
-              >
-                <option value="Refreshments">Refreshments</option>
-                <option value="Catering/Food">Catering/Food</option>
-                <option value="Venue Provider">Venue Provider</option>
-              </select>
-            </div>
-            <div>
-              <label htmlFor="edit-business-description" className="block text-sm font-medium text-neutral-lightGray">Description</label>
+              <label htmlFor="productDescriptionTextarea" className="block text-sm text-neutral-lightGray mb-1">
+                Product Description
+              </label>
               <textarea
-                id="edit-business-description"
-                value={editingBusiness.description}
-                onChange={(e) => setEditingBusiness({ ...editingBusiness, description: e.target.value })}
-                placeholder="Description"
-                className="w-full p-2 rounded bg-neutral-offWhite text-neutral-darkGray"
-                rows={3}
-                aria-label="Business Description"
+                id="productDescriptionTextarea"
+                value={newProduct.description}
+                onChange={(e) => setNewProduct({ ...newProduct, description: e.target.value })}
+                className="w-full p-3 rounded bg-neutral-offWhite text-neutral-darkGray"
+                rows={2}
+                placeholder="Describe the product"
+                disabled={loading}
               />
             </div>
-            <div className="space-y-2">
-              {editingBusiness.products.map((product, index) => (
-                <div key={index} className="flex items-center space-x-2">
-                  {product.imageUrl && (
-                    <img src={product.imageUrl} alt={product.name} className="w-12 h-12 object-cover rounded" />
-                  )}
-                  <div>
-                    <label htmlFor={`edit-product-name-${index}`} className="block text-sm font-medium text-neutral-lightGray">Product Name</label>
-                    <input
-                      id={`edit-product-name-${index}`}
-                      type="text"
-                      value={product.name}
-                      onChange={(e) => {
-                        const updatedProducts = [...editingBusiness.products];
-                        updatedProducts[index].name = e.target.value;
-                        setEditingBusiness({ ...editingBusiness, products: updatedProducts });
-                      }}
-                      className="p-1 rounded bg-neutral-offWhite text-neutral-darkGray"
-                      aria-label={`Product Name ${index + 1}`}
-                    />
-                    <label htmlFor={`edit-product-inStock-${index}`} className="block text-sm font-medium text-neutral-lightGray">In Stock</label>
-                    <input
-                      id={`edit-product-inStock-${index}`}
-                      type="checkbox"
-                      checked={product.inStock}
-                      onChange={(e) => {
-                        const updatedProducts = [...editingBusiness.products];
-                        updatedProducts[index].inStock = e.target.checked;
-                        setEditingBusiness({ ...editingBusiness, products: updatedProducts });
-                      }}
-                      aria-label={`In Stock ${index + 1}`}
-                    />
-                  </div>
-                </div>
-              ))}
+            <div>
+              <label htmlFor="productImageInput" className="block text-sm text-neutral-lightGray mb-1">
+                Product Image
+              </label>
+              <input
+                id="productImageInput"
+                type="file"
+                accept="image/*"
+                onChange={(e) => setNewProduct({ ...newProduct, file: e.target.files?.[0] || undefined })}
+                className="w-full p-3 text-neutral-darkGray"
+                disabled={loading}
+              />
+            </div>
+            <div className="flex items-center">
+              <input
+                type="checkbox"
+                checked={newProduct.inStock}
+                onChange={(e) => setNewProduct({ ...newProduct, inStock: e.target.checked })}
+                className="mr-2"
+                id="inStockCheckbox"
+                disabled={loading}
+              />
+              <label htmlFor="inStockCheckbox" className="text-neutral-lightGray">
+                In Stock
+              </label>
             </div>
             <button
-              type="submit"
-              className="w-full bg-secondary-deepRed text-neutral-lightGray p-2 rounded hover:bg-secondary-darkRed"
+              onClick={handleAddProduct}
+              className="w-full p-3 bg-secondary-deepRed text-neutral-lightGray rounded hover:bg-secondary-darkRed flex items-center justify-center disabled:opacity-50"
               disabled={loading}
             >
-              {loading ? 'Updating...' : 'Update'}
+              <FaPlus className="mr-2" />
+              Add Product
             </button>
-            <button
-              type="button"
-              className="w-full bg-gray-500 text-neutral-lightGray p-2 rounded hover:bg-gray-600"
-              onClick={() => setEditingBusiness(null)}
-              disabled={loading}
-            >
-              Cancel
-            </button>
-          </form>
-        </motion.section>
-      )}
+          </div>
+        </motion.div>
+      </motion.div>
     </div>
   );
 }

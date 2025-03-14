@@ -1,27 +1,12 @@
 import { useState, useEffect } from 'react';
-import { collection, getDocs, doc, updateDoc, addDoc } from 'firebase/firestore';
+import { doc, updateDoc, addDoc, collection, getDocs, QueryDocumentSnapshot, DocumentData } from 'firebase/firestore'; // Added imports
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { db, storage } from '../services/firebase';
+import { db, storage, getEvents, EventData } from '../services/firebase';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { FaCalendarAlt, FaHeart, FaComment } from 'react-icons/fa';
 import { motion } from 'framer-motion';
 import CustomQRCode from '../components/CustomQRCode';
-
-interface Event {
-  id: string;
-  title: string;
-  date: string;
-  description: string;
-  category: 'Refreshments' | 'Catering/Food' | 'Venue Provider';
-  imageUrl?: string;
-  organizerId: string;
-  organizers: string[];
-  visibility: 'public' | 'private';
-  inviteLink: string;
-  invitedUsers: string[];
-  pendingInvites: string[];
-}
 
 interface Post {
   id: string;
@@ -38,8 +23,8 @@ function Events() {
   const { currentUser } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const [events, setEvents] = useState<Event[]>([]);
-  const [filteredEvents, setFilteredEvents] = useState<Event[]>([]);
+  const [events, setEvents] = useState<EventData[]>([]);
+  const [filteredEvents, setFilteredEvents] = useState<EventData[]>([]);
   const [posts, setPosts] = useState<{ [eventId: string]: Post[] }>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -78,28 +63,15 @@ function Events() {
 
   useEffect(() => {
     fetchEvents();
-  }, []);
+  }, [currentUser]);
 
   const fetchEvents = async () => {
     setLoading(true);
     setError(null);
     try {
-      const eventsCol = collection(db, 'events');
-      const snapshot = await getDocs(eventsCol);
-      const eventsData = snapshot.docs.map((doc) => ({
-        id: doc.id,
-        title: doc.data().title,
-        date: doc.data().date,
-        description: doc.data().description,
-        category: doc.data().category,
-        imageUrl: doc.data().imageUrl || doc.data().image,
-        organizerId: doc.data().organizerId,
-        organizers: doc.data().organizers || [],
-        visibility: doc.data().visibility || 'public',
-        inviteLink: doc.data().inviteLink,
-        invitedUsers: doc.data().invitedUsers || [],
-        pendingInvites: doc.data().pendingInvites || [],
-      })) as Event[];
+      console.log('Fetching events, user:', currentUser?.uid);
+      const eventsData = await getEvents();
+      console.log('Fetched events:', eventsData);
       setEvents(eventsData);
 
       const searchParams = new URLSearchParams(location.search);
@@ -112,7 +84,7 @@ function Events() {
         if (currentUser && (event.organizers.includes(currentUser.uid) || event.invitedUsers.includes(currentUser.uid))) {
           const postsCol = collection(db, 'events', event.id, 'posts');
           const postsSnapshot = await getDocs(postsCol);
-          postsData[event.id] = postsSnapshot.docs.map((doc) => ({
+          postsData[event.id] = postsSnapshot.docs.map((doc: QueryDocumentSnapshot<DocumentData>) => ({
             id: doc.id,
             userId: doc.data().userId,
             mediaUrl: doc.data().mediaUrl,
@@ -133,18 +105,8 @@ function Events() {
     }
   };
 
-  const filterEvents = (eventsData: Event[], query: string = searchQuery) => {
-    let result = eventsData;
-    if (!currentUser) {
-      result = result.filter((e) => e.visibility === 'public');
-    } else {
-      result = result.filter(
-        (e) =>
-          e.visibility === 'public' ||
-          e.organizers.includes(currentUser.uid) ||
-          e.invitedUsers.includes(currentUser.uid)
-      );
-    }
+  const filterEvents = (eventsData: EventData[], query: string = searchQuery) => {
+    let result = [...eventsData];
     if (filter) {
       result = result.filter((e) => e.category === filter);
     }
@@ -192,7 +154,7 @@ function Events() {
     try {
       const eventRef = doc(db, 'events', eventId);
       const event = events.find((e) => e.id === eventId);
-      if (event && event.organizerId === currentUser.uid) {
+      if (event && event.userId === currentUser.uid) {
         await updateDoc(eventRef, {
           invitedUsers: [...event.invitedUsers, userId],
           pendingInvites: event.pendingInvites.filter((id) => id !== userId),
@@ -210,7 +172,7 @@ function Events() {
     try {
       const eventRef = doc(db, 'events', eventId);
       const event = events.find((e) => e.id === eventId);
-      if (event && event.organizerId === currentUser.uid && !event.organizers.includes(newCollaborator)) {
+      if (event && event.userId === currentUser.uid && !event.organizers.includes(newCollaborator)) {
         await updateDoc(eventRef, {
           organizers: [...event.organizers, newCollaborator],
         });
@@ -240,13 +202,14 @@ function Events() {
         date: newEvent.date,
         description: newEvent.description,
         category: newEvent.category,
-        organizerId: currentUser.uid,
+        userId: currentUser.uid,
         organizers: [currentUser.uid],
         visibility: newEvent.visibility,
         inviteLink: `https://eventify.com/invite/${Date.now()}`,
         invitedUsers: [],
         pendingInvites: [],
-        imageUrl,
+        image: imageUrl,
+        createdAt: new Date().toISOString(),
       };
       const docRef = await addDoc(collection(db, 'events'), eventData);
       setNewEvent({ title: '', date: '', description: '', category: 'Refreshments', visibility: 'public', image: null });
@@ -295,7 +258,7 @@ function Events() {
     if (!currentUser) return setError('Please log in to like posts.');
     try {
       const postRef = doc(db, 'events', eventId, 'posts', postId);
-      const post = posts[eventId]?.find((p) => p.id === postId);
+      const post = posts[eventId]?.findadir((p) => p.id === postId);
       if (post) {
         const likes = post.likes.includes(currentUser.uid)
           ? post.likes.filter((id) => id !== currentUser.uid)
@@ -330,12 +293,12 @@ function Events() {
     setShowOptions(null);
   };
 
-  const getCategoryColor = (category: Event['category']) => {
+  const getCategoryColor = (category?: EventData['category']) => {
     switch (category) {
       case 'Refreshments': return 'bg-refreshments-lightBlue';
       case 'Catering/Food': return 'bg-catering-orange';
       case 'Venue Provider': return 'bg-venue-green';
-      default: return 'bg-gray-500';
+      default: return 'bg-gray-500'; // Default for undefined
     }
   };
 
@@ -371,6 +334,7 @@ function Events() {
             <button
               onClick={clearSearch}
               className="absolute right-3 top-1/2 transform -translate-y-1/2 text-accent-gold hover:text-secondary-deepRed"
+              aria-label="Clear search"
             >
               <svg
                 className="w-5 h-5"
@@ -416,7 +380,24 @@ function Events() {
           </button>
         </div>
 
-        {loading && <p className="text-center">Loading events...</p>}
+        {loading && (
+          <div className="text-center">
+            <svg
+              className="animate-spin h-8 w-8 text-accent-gold mx-auto"
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+            >
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path
+                className="opacity-75"
+                fill="currentColor"
+                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+              />
+            </svg>
+            <p>Loading events...</p>
+          </div>
+        )}
         {error && <p className="text-red-500 text-center">{error}</p>}
         {!loading && !error && (
           <motion.div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" initial="hidden" animate="visible" variants={stagger}>
@@ -424,14 +405,19 @@ function Events() {
               filteredEvents.map((event) => (
                 <motion.div key={event.id} className="bg-neutral-offWhite text-neutral-darkGray p-4 rounded shadow" variants={fadeIn}>
                   <div className={`${getCategoryColor(event.category)} h-2 rounded-t`}></div>
-                  {event.imageUrl ? (
-                    <img src={event.imageUrl} alt={event.title} className="w-full h-40 object-cover rounded-t mt-2" />
+                  {event.image ? (
+                    <img
+                      src={event.image}
+                      alt={event.title}
+                      className="w-full h-40 object-cover rounded-t mt-2"
+                      onError={(e) => (e.currentTarget.src = 'https://picsum.photos/300/200')}
+                    />
                   ) : (
                     <FaCalendarAlt className="w-full h-40 text-gray-400 mt-2" />
                   )}
                   <h3 className="text-xl font-semibold mt-2">{event.title}</h3>
-                  <p className="text-sm text-accent-gold">{event.date}</p>
-                  <p className="mt-2">{event.description}</p>
+                  <p className="text-sm text-accent-gold">{event.date || event.createdAt}</p>
+                  <p className="mt-2">{event.description || 'No description available'}</p>
                   <p className="text-sm mt-1">
                     {event.visibility === 'public' ? 'Public Event' : 'Private Event'}
                   </p>
@@ -440,13 +426,13 @@ function Events() {
                     <label className="text-sm">Share Invite:</label>
                     <input
                       type="text"
-                      value={event.inviteLink}
+                      value={event.inviteLink || ''}
                       readOnly
                       className="w-full p-2 rounded bg-white text-neutral-darkGray mt-1"
                       aria-label="Event Invite Link"
                     />
                     <div className="mt-2 flex justify-center">
-                      <CustomQRCode value={event.inviteLink} imageUrl={event.imageUrl} size={120} />
+                      <CustomQRCode value={event.inviteLink || ''} imageUrl={event.image} size={120} />
                     </div>
                   </div>
 
@@ -666,7 +652,7 @@ function Events() {
               <select
                 id="category"
                 value={newEvent.category}
-                onChange={(e) => setNewEvent({ ...newEvent, category: e.target.value as Event['category'] })}
+                onChange={(e) => setNewEvent({ ...newEvent, category: e.target.value as EventData['category'] })}
                 className="w-full p-2 rounded bg-white text-neutral-darkGray"
               >
                 <option value="Refreshments">Refreshments</option>

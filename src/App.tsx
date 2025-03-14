@@ -9,6 +9,7 @@ import { AuthProvider } from './context/AuthContext';
 const Home = lazy(() => import('./pages/Home'));
 const Events = lazy(() => import('./pages/Events'));
 const Business = lazy(() => import('./pages/Business'));
+const BusinessProfile = lazy(() => import('./pages/BusinessProfile'));
 const Profile = lazy(() => import('./pages/Profile'));
 const Register = lazy(() => import('./pages/Register'));
 const Login = lazy(() => import('./pages/Login'));
@@ -17,6 +18,8 @@ const EventDetail = lazy(() => import('./pages/EventDetail'));
 const About = lazy(() => import('./pages/About'));
 const ForgotPassword = lazy(() => import('./pages/ForgotPassword'));
 const Settings = lazy(() => import('./pages/Settings'));
+const Chat = lazy(() => import('./pages/Chat'));
+const MediaEditor = lazy(() => import('./pages/MediaEditor'));
 
 function App() {
   return (
@@ -55,6 +58,7 @@ function App() {
               <Route path="/" element={<Home />} />
               <Route path="/events" element={<Events />} />
               <Route path="/business" element={<Business />} />
+              <Route path="/business-profile" element={<BusinessProfile />} />
               <Route path="/profile" element={<Profile />} />
               <Route path="/register" element={<Register />} />
               <Route path="/login" element={<Login />} />
@@ -63,6 +67,8 @@ function App() {
               <Route path="/about" element={<About />} />
               <Route path="/forgot-password" element={<ForgotPassword />} />
               <Route path="/settings" element={<Settings />} />
+              <Route path="/chat" element={<Chat />} />
+              <Route path="/media-editor" element={<MediaEditor />} />
             </Routes>
           </Suspense>
         </main>

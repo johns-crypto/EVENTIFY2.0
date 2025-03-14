@@ -1,7 +1,8 @@
+// src/pages/Home.tsx
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { useAuth } from '../context/AuthContext';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { getEvents, EventData, getUserData, db, storage } from '../services/firebase';
 import { doc, setDoc, collection } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
@@ -9,6 +10,7 @@ import { toast } from 'react-toastify';
 
 function Home() {
   const { currentUser } = useAuth();
+  const navigate = useNavigate();
   const [events, setEvents] = useState<EventData[]>([]);
   const [username, setUsername] = useState('');
   const [loading, setLoading] = useState(true);
@@ -45,23 +47,15 @@ function Home() {
       setError(null);
       try {
         console.log('Fetching events, user:', currentUser?.uid);
-        const eventData = await getEvents();
-        console.log('Raw event data:', eventData);
-        const filteredEvents = eventData.filter((event) =>
-          event.visibility === 'public' ||
-          (currentUser && (
-            event.userId === currentUser.uid ||
-            event.organizers?.includes(currentUser.uid) ||
-            event.invitedUsers?.includes(currentUser.uid)
-          ))
-        );
-        setEvents(filteredEvents);
-        console.log('Filtered events:', filteredEvents);
+        const eventData = await getEvents(); // Handles both authenticated and unauthenticated cases
+        console.log('Fetched events:', eventData);
+        setEvents(eventData);
 
         if (currentUser) {
           console.log('Fetching user data for:', currentUser.uid);
           const userData = await getUserData(currentUser.uid);
           setUsername(userData?.displayName || currentUser.email?.split('@')[0] || 'User');
+          if (!userData) console.warn('No user data found, using email fallback');
           console.log('User data:', userData);
         } else {
           setUsername('');
@@ -76,7 +70,7 @@ function Home() {
     };
 
     fetchData();
-  }, [currentUser]);
+  }, [currentUser, navigate]);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value, files } = e.target;
@@ -101,11 +95,16 @@ function Home() {
       console.log('Creating event with ID:', eventId);
       let imageUrl = '';
       if (formData.image) {
-        const storageRef = ref(storage, `events/${eventId}/${formData.image.name}`);
-        console.log('Uploading image to:', storageRef.fullPath);
-        await uploadBytes(storageRef, formData.image);
-        imageUrl = await getDownloadURL(storageRef);
-        console.log('Image URL:', imageUrl);
+        try {
+          const storageRef = ref(storage, `events/${eventId}/${formData.image.name}`);
+          console.log('Uploading image to:', storageRef.fullPath);
+          await uploadBytes(storageRef, formData.image);
+          imageUrl = await getDownloadURL(storageRef);
+          console.log('Image URL:', imageUrl);
+        } catch (uploadErr: any) {
+          console.error('Image upload failed:', uploadErr);
+          toast.warn('Event created without image due to upload failure.');
+        }
       }
 
       const newEvent: EventData = {
@@ -115,7 +114,7 @@ function Home() {
         createdAt: new Date().toISOString(),
         date: formData.date,
         location: formData.location,
-        image: imageUrl || undefined,
+        image: imageUrl || '',
         visibility: 'public',
         organizers: [currentUser.uid],
         invitedUsers: [],

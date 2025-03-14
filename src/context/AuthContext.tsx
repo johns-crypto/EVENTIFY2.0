@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { onAuthStateChanged, User } from 'firebase/auth';
-import { auth, loginUser, registerUser, logoutUser, getUserData } from '../services/firebase'; // Added getUserData
+import { auth, loginUser, registerUser, logoutUser, getUserData } from '../services/firebase';
 import { toast } from 'react-toastify';
 
 interface AuthContextType {
@@ -9,7 +9,7 @@ interface AuthContextType {
   error: string | null;
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
-  register: (email: string, password: string, displayName?: string) => Promise<void>; // Added displayName
+  register: (email: string, password: string, displayName?: string) => Promise<void>;
   userProfile: { name?: string; profilePicture?: string } | null;
 }
 
@@ -22,23 +22,29 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [userProfile, setUserProfile] = useState<{ name?: string; profilePicture?: string } | null>(null);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      // Avoid async directly in the callback to prevent channel issues
       setCurrentUser(user);
       if (user) {
-        try {
-          const userData = await getUserData(user.uid);
-          setUserProfile({
-            name: userData?.displayName || user.displayName || user.email?.split('@')[0],
-            profilePicture: userData?.profilePicture || user.photoURL || undefined,
-          });
-        } catch (err: any) {
-          console.error('Error fetching user profile:', err);
-          setError('Failed to load user profile: ' + err.message);
-        }
+        // Fetch user data in a separate async function
+        const fetchUserProfile = async () => {
+          try {
+            const userData = await getUserData(user.uid);
+            setUserProfile({
+              name: userData?.displayName || user.displayName || user.email?.split('@')[0],
+              profilePicture: userData?.photoURL || user.photoURL || undefined, // Fixed field name to match firebase.ts
+            });
+          } catch (err: any) {
+            console.error('Error fetching user profile:', err);
+            setError('Failed to load user profile: ' + err.message);
+            toast.error('Failed to load profile: ' + err.message);
+          }
+        };
+        fetchUserProfile();
       } else {
         setUserProfile(null);
       }
-      setLoading(false);
+      setLoading(false); // Set loading false after initial auth check
     });
 
     return () => unsubscribe();
@@ -49,11 +55,11 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     setError(null);
     try {
       const user = await loginUser(email, password);
-      setCurrentUser(user); // Update currentUser immediately
+      setCurrentUser(user);
       const userData = await getUserData(user.uid);
       setUserProfile({
         name: userData?.displayName || user.displayName || user.email?.split('@')[0],
-        profilePicture: userData?.profilePicture || user.photoURL || undefined,
+        profilePicture: userData?.photoURL || user.photoURL || undefined,
       });
       toast.success('Logged in successfully!');
     } catch (err: any) {
@@ -69,7 +75,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     setError(null);
     try {
       const user = await registerUser(email, password, displayName);
-      setCurrentUser(user); // Update currentUser immediately
+      setCurrentUser(user);
       setUserProfile({
         name: displayName || user.displayName || user.email?.split('@')[0],
         profilePicture: user.photoURL || undefined,
@@ -88,8 +94,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     setError(null);
     try {
       await logoutUser();
-      setCurrentUser(null); // Clear currentUser immediately
-      setUserProfile(null); // Clear userProfile
+      setCurrentUser(null);
+      setUserProfile(null);
       toast.success('Logged out successfully!');
     } catch (err: any) {
       setError(err.message);
@@ -101,7 +107,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
   return (
     <AuthContext.Provider value={{ currentUser, loading, error, login, logout, register, userProfile }}>
-      {!loading && children} {/* Only render children when not loading */}
+      {!loading && children}
     </AuthContext.Provider>
   );
 };
