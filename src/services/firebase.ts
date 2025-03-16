@@ -22,6 +22,8 @@ import {
   updateDoc,
   addDoc,
   QueryDocumentSnapshot,
+  onSnapshot,
+  QuerySnapshot,
 } from 'firebase/firestore';
 import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 
@@ -58,22 +60,20 @@ export const registerUser = async (
   try {
     const userCredential = await createUserWithEmailAndPassword(auth, email, password);
     const user = userCredential.user;
-    if (displayName) {
-      await updateProfile(user, { displayName });
-      await setDoc(doc(db, 'users', user.uid), {
-        displayName,
-        email,
-        createdAt: new Date().toISOString(),
-        bio: '',
-        location: '',
-        photoURL: '',
-        contactEmail: email,
-        contactPhone: '',
-        followers: [],
-        following: [],
-        notificationsEnabled: true,
-      });
-    }
+    await updateProfile(user, { displayName: displayName || 'Anonymous' });
+    await setDoc(doc(db, 'users', user.uid), {
+      displayName: displayName || 'Anonymous',
+      email,
+      createdAt: new Date().toISOString(),
+      bio: '',
+      location: '',
+      photoURL: '',
+      contactEmail: email,
+      contactPhone: '',
+      followers: [],
+      following: [],
+      notificationsEnabled: true,
+    });
     return user;
   } catch (error: any) {
     console.error('Registration error:', error);
@@ -106,7 +106,7 @@ export interface EventData {
   inviteLink?: string;
   invitedUsers: string[];
   pendingInvites: string[];
-  description?: string; // Added description field
+  description?: string;
 }
 
 export interface PostData {
@@ -151,13 +151,21 @@ export interface UserData {
   notificationsEnabled: boolean;
 }
 
+export interface ChatData {
+  id: string;
+  title: string;
+  admins: string[];
+  members: string[];
+  createdAt: string;
+  messages?: { userId: string; text: string; timestamp: string }[];
+}
+
 // Firestore Functions
 export const getEvents = async (): Promise<EventData[]> => {
   try {
     const eventsCol = collection(db, 'events');
 
     if (!auth.currentUser) {
-      // For unauthenticated users, fetch only public events
       const publicQuery = query(
         eventsCol,
         where('visibility', '==', 'public'),
@@ -185,39 +193,31 @@ export const getEvents = async (): Promise<EventData[]> => {
           inviteLink: data.inviteLink || '',
           invitedUsers: data.invitedUsers || [],
           pendingInvites: data.pendingInvites || [],
-          description: data.description || '', // Added description
+          description: data.description || '',
         } as EventData;
       });
     }
 
-    // For authenticated users
     const userId = auth.currentUser.uid;
     const userDoc = await getDoc(doc(db, 'users', userId));
     const userData = userDoc.data() as UserData | undefined;
     const following = userData?.following || [];
 
-    // Query 1: Public events
     const publicQuery = query(
       eventsCol,
       where('visibility', '==', 'public'),
       orderBy('createdAt', 'desc')
     );
-
-    // Query 2: Events where user is an organizer
     const organizerQuery = query(
       eventsCol,
       where('organizers', 'array-contains', userId),
       orderBy('createdAt', 'desc')
     );
-
-    // Query 3: Events where user is invited
     const invitedQuery = query(
       eventsCol,
       where('invitedUsers', 'array-contains', userId),
       orderBy('createdAt', 'desc')
     );
-
-    // Query 4: Events where an organizer is in user's following list
     const followingQuery = following.length > 0
       ? query(
           eventsCol,
@@ -226,7 +226,6 @@ export const getEvents = async (): Promise<EventData[]> => {
         )
       : null;
 
-    // Execute all queries in parallel
     const [publicSnapshot, organizerSnapshot, invitedSnapshot, followingSnapshot] = await Promise.all([
       getDocs(publicQuery),
       getDocs(organizerQuery),
@@ -234,7 +233,6 @@ export const getEvents = async (): Promise<EventData[]> => {
       followingQuery ? getDocs(followingQuery) : Promise.resolve({ docs: [] } as any),
     ]);
 
-    // Combine results into a Map to deduplicate by event ID
     const eventMap = new Map<string, EventData>();
     [publicSnapshot, organizerSnapshot, invitedSnapshot, followingSnapshot].forEach((snapshot) => {
       snapshot.docs.forEach((doc: QueryDocumentSnapshot<DocumentData>) => {
@@ -254,12 +252,11 @@ export const getEvents = async (): Promise<EventData[]> => {
           inviteLink: data.inviteLink || '',
           invitedUsers: data.invitedUsers || [],
           pendingInvites: data.pendingInvites || [],
-          description: data.description || '', // Added description
+          description: data.description || '',
         } as EventData);
       });
     });
 
-    // Convert to array and sort by createdAt descending
     const eventsList = Array.from(eventMap.values()).sort((a, b) => {
       return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
     });
@@ -281,28 +278,21 @@ export const getUserEvents = async (userId: string): Promise<EventData[]> => {
     const userData = userDoc.data() as UserData | undefined;
     const following = userData?.following || [];
 
-    // Query 1: Public events
     const publicQuery = query(
       eventsCol,
       where('visibility', '==', 'public'),
       orderBy('createdAt', 'desc')
     );
-
-    // Query 2: Events where user is an organizer
     const organizerQuery = query(
       eventsCol,
       where('organizers', 'array-contains', userId),
       orderBy('createdAt', 'desc')
     );
-
-    // Query 3: Events where user is invited
     const invitedQuery = query(
       eventsCol,
       where('invitedUsers', 'array-contains', userId),
       orderBy('createdAt', 'desc')
     );
-
-    // Query 4: Events where an organizer is in user's following list
     const followingQuery = following.length > 0
       ? query(
           eventsCol,
@@ -311,7 +301,6 @@ export const getUserEvents = async (userId: string): Promise<EventData[]> => {
         )
       : null;
 
-    // Execute all queries in parallel
     const [publicSnapshot, organizerSnapshot, invitedSnapshot, followingSnapshot] = await Promise.all([
       getDocs(publicQuery),
       getDocs(organizerQuery),
@@ -319,7 +308,6 @@ export const getUserEvents = async (userId: string): Promise<EventData[]> => {
       followingQuery ? getDocs(followingQuery) : Promise.resolve({ docs: [] } as any),
     ]);
 
-    // Combine results into a Map to deduplicate by event ID
     const eventMap = new Map<string, EventData>();
     [publicSnapshot, organizerSnapshot, invitedSnapshot, followingSnapshot].forEach((snapshot) => {
       snapshot.docs.forEach((doc: QueryDocumentSnapshot<DocumentData>) => {
@@ -339,12 +327,11 @@ export const getUserEvents = async (userId: string): Promise<EventData[]> => {
           inviteLink: data.inviteLink || '',
           invitedUsers: data.invitedUsers || [],
           pendingInvites: data.pendingInvites || [],
-          description: data.description || '', // Added description
+          description: data.description || '',
         } as EventData);
       });
     });
 
-    // Convert to array and sort by createdAt descending
     const eventsList = Array.from(eventMap.values()).sort((a, b) => {
       return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
     });
@@ -450,7 +437,32 @@ export const getBusinesses = async (): Promise<BusinessData[]> => {
   }
 };
 
-// Export all necessary Firestore and Storage functions
+export const createGroupChat = async (chatId: string, title: string, admins: string[], members: string[]): Promise<void> => {
+  try {
+    const chatData: ChatData = {
+      id: chatId,
+      title,
+      admins,
+      members,
+      createdAt: new Date().toISOString(),
+      messages: [],
+    };
+    await setDoc(doc(db, 'chats', chatId), chatData);
+    console.log(`Group chat created with ID: ${chatId}`);
+  } catch (error: any) {
+    console.error('Error creating group chat:', error);
+    throw new Error(`Failed to create group chat: ${error.message}`);
+  }
+};
+
+// Export types separately
+export type {
+  QuerySnapshot,
+  QueryDocumentSnapshot,
+  DocumentData,
+};
+
+// Export values (functions and instances)
 export {
   doc,
   updateDoc,
@@ -461,6 +473,7 @@ export {
   where,
   setDoc,
   addDoc,
+  onSnapshot,
   ref,
   uploadBytes,
   getDownloadURL,

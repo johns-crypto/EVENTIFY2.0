@@ -1,135 +1,121 @@
 import { useState, useEffect } from 'react';
-import { doc, updateDoc, addDoc, collection, getDocs, QueryDocumentSnapshot, DocumentData } from 'firebase/firestore'; // Added imports
+import { doc, updateDoc, addDoc, collection } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { db, storage, getEvents, EventData } from '../services/firebase';
+import { db, storage, getEvents, EventData, getUserData } from '../services/firebase';
 import { useAuth } from '../context/AuthContext';
-import { useNavigate, useLocation } from 'react-router-dom';
-import { FaCalendarAlt, FaHeart, FaComment } from 'react-icons/fa';
-import { motion } from 'framer-motion';
-import CustomQRCode from '../components/CustomQRCode';
+import { useNavigate } from 'react-router-dom';
+import { FaPlus, FaCheck } from 'react-icons/fa';
+import { motion, AnimatePresence } from 'framer-motion';
+import Cropper from 'react-easy-crop';
+import { createGroupChat } from '../services/firebase';
 
-interface Post {
-  id: string;
-  userId: string;
-  mediaUrl: string;
-  type: 'photo' | 'video';
-  visibility: 'public' | 'private';
-  likes: string[];
-  comments: { userId: string; text: string }[];
-  createdAt: string;
+interface UserData {
+  displayName: string;
+  email: string;
+  photoURL: string;
+  followers: string[];
 }
 
 function Events() {
   const { currentUser } = useAuth();
   const navigate = useNavigate();
-  const location = useLocation();
   const [events, setEvents] = useState<EventData[]>([]);
   const [filteredEvents, setFilteredEvents] = useState<EventData[]>([]);
-  const [posts, setPosts] = useState<{ [eventId: string]: Post[] }>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<string | null>(null);
-  const [newCollaborator, setNewCollaborator] = useState('');
-  const [showCreateForm, setShowCreateForm] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchDate, setSearchDate] = useState('');
+  const [showCreateEventModal, setShowCreateEventModal] = useState(false);
+  const [step, setStep] = useState(1);
+  const [userPhotoURL, setUserPhotoURL] = useState<string | null>(null);
   const [newEvent, setNewEvent] = useState({
     title: '',
+    location: '',
     date: '',
-    description: '',
-    category: 'Refreshments' as 'Refreshments' | 'Catering/Food' | 'Venue Provider',
     visibility: 'public' as 'public' | 'private',
+    organizers: [] as string[],
+    inviteLink: '',
     image: null as File | null,
+    description: '',
+    croppedImage: null as string | null,
   });
-  const [showOptions, setShowOptions] = useState<string | null>(null);
-  const [newPost, setNewPost] = useState<{ [eventId: string]: { media: File | null; visibility: 'public' | 'private' } }>({});
-  const [searchQuery, setSearchQuery] = useState('');
+  const [followers, setFollowers] = useState<UserData[]>([]);
+  const [crop, setCrop] = useState({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(1);
+  const [croppedAreaPixels, setCroppedAreaPixels] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
 
-  const fadeIn = {
-    hidden: { opacity: 0, y: 20 },
-    visible: { opacity: 1, y: 0, transition: { duration: 0.6 } },
-  };
-
-  const stagger = {
-    visible: { transition: { staggerChildren: 0.2 } },
-  };
-
+  const fadeIn = { hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 0, transition: { duration: 0.6 } } };
+  const stagger = { visible: { transition: { staggerChildren: 0.2 } } };
   const headingFade = {
     hidden: { opacity: 0, y: -30 },
-    visible: {
-      opacity: 1,
-      y: 0,
-      transition: { duration: 0.8, ease: 'easeOut', type: 'spring', bounce: 0.3 },
-    },
+    visible: { opacity: 1, y: 0, transition: { duration: 0.8, ease: 'easeOut', type: 'spring', bounce: 0.3 } },
+  };
+  const textVariants = {
+    hidden: { opacity: 0, x: -10, width: 0 },
+    visible: { opacity: 1, x: 0, width: 'auto', transition: { duration: 0.3, ease: 'easeInOut' } },
+    exit: { opacity: 0, x: -10, width: 0, transition: { duration: 0.3, ease: 'easeInOut' } },
   };
 
   useEffect(() => {
     fetchEvents();
   }, [currentUser]);
 
+  useEffect(() => {
+    if (currentUser) {
+      getUserData(currentUser.uid).then((user) => {
+        if (user) {
+          setUserPhotoURL(user.photoURL || 'https://picsum.photos/300/200');
+          setFollowers(user.followers.map((uid) => ({ displayName: uid, email: '', photoURL: '', followers: [] })));
+        }
+      });
+    }
+  }, [currentUser]);
+
   const fetchEvents = async () => {
     setLoading(true);
     setError(null);
     try {
-      console.log('Fetching events, user:', currentUser?.uid);
       const eventsData = await getEvents();
-      console.log('Fetched events:', eventsData);
       setEvents(eventsData);
-
-      const searchParams = new URLSearchParams(location.search);
-      const query = searchParams.get('search')?.toLowerCase() || '';
-      setSearchQuery(query);
-      filterEvents(eventsData, query);
-
-      const postsData: { [eventId: string]: Post[] } = {};
-      for (const event of eventsData) {
-        if (currentUser && (event.organizers.includes(currentUser.uid) || event.invitedUsers.includes(currentUser.uid))) {
-          const postsCol = collection(db, 'events', event.id, 'posts');
-          const postsSnapshot = await getDocs(postsCol);
-          postsData[event.id] = postsSnapshot.docs.map((doc: QueryDocumentSnapshot<DocumentData>) => ({
-            id: doc.id,
-            userId: doc.data().userId,
-            mediaUrl: doc.data().mediaUrl,
-            type: doc.data().type as 'photo' | 'video',
-            visibility: doc.data().visibility as 'public' | 'private',
-            likes: doc.data().likes || [],
-            comments: doc.data().comments || [],
-            createdAt: doc.data().createdAt,
-          })) as Post[];
-        }
-      }
-      setPosts(postsData);
+      filterEvents(eventsData);
     } catch (err: any) {
-      setError('Failed to fetch events or posts: ' + err.message);
-      console.error('Error fetching data:', err);
+      setError('Failed to fetch events: ' + err.message);
     } finally {
       setLoading(false);
     }
   };
 
-  const filterEvents = (eventsData: EventData[], query: string = searchQuery) => {
+  const filterEvents = (eventsData: EventData[]) => {
     let result = [...eventsData];
-    if (filter) {
-      result = result.filter((e) => e.category === filter);
+    if (searchQuery) {
+      result = result.filter((e) => e.title.toLowerCase().includes(searchQuery.toLowerCase()));
     }
-    if (query) {
-      result = result.filter((e) => e.title.toLowerCase().includes(query));
+    if (searchDate) {
+      const [month, day] = searchDate.split('-');
+      result = result.filter((e) => {
+        const eventDate = new Date(e.date || e.createdAt).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit' });
+        return eventDate === `${month}-${day}`;
+      });
     }
     setFilteredEvents(result);
   };
 
-  const handleFilter = (category: string | null) => {
-    setFilter(category);
-    filterEvents(events, searchQuery);
+  const handleSearch = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const query = e.target.value;
+    setSearchQuery(query);
+    filterEvents(events);
   };
 
-  const handleSearch = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const query = e.target.value.toLowerCase();
-    setSearchQuery(query);
-    filterEvents(events, query);
+  const handleDateSearch = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const date = e.target.value;
+    setSearchDate(date);
+    filterEvents(events);
   };
 
   const clearSearch = () => {
     setSearchQuery('');
-    filterEvents(events, '');
+    setSearchDate('');
+    filterEvents(events);
   };
 
   const requestInvite = async (eventId: string) => {
@@ -138,72 +124,35 @@ function Events() {
       const eventRef = doc(db, 'events', eventId);
       const event = events.find((e) => e.id === eventId);
       if (event && !event.pendingInvites.includes(currentUser.uid)) {
-        await updateDoc(eventRef, {
-          pendingInvites: [...event.pendingInvites, currentUser.uid],
-        });
+        await updateDoc(eventRef, { pendingInvites: [...event.pendingInvites, currentUser.uid] });
         fetchEvents();
       }
     } catch (err) {
       setError('Failed to request invite.');
-      console.error('Error requesting invite:', err);
     }
   };
 
-  const approveInvite = async (eventId: string, userId: string) => {
-    if (!currentUser) return;
-    try {
-      const eventRef = doc(db, 'events', eventId);
-      const event = events.find((e) => e.id === eventId);
-      if (event && event.userId === currentUser.uid) {
-        await updateDoc(eventRef, {
-          invitedUsers: [...event.invitedUsers, userId],
-          pendingInvites: event.pendingInvites.filter((id) => id !== userId),
-        });
-        fetchEvents();
-      }
-    } catch (err) {
-      setError('Failed to approve invite.');
-      console.error('Error approving invite:', err);
-    }
-  };
+  const handleNextStep = () => setStep((prev) => prev + 1);
+  const handlePrevStep = () => setStep((prev) => prev - 1);
 
-  const addCollaborator = async (eventId: string) => {
-    if (!newCollaborator || !currentUser) return;
-    try {
-      const eventRef = doc(db, 'events', eventId);
-      const event = events.find((e) => e.id === eventId);
-      if (event && event.userId === currentUser.uid && !event.organizers.includes(newCollaborator)) {
-        await updateDoc(eventRef, {
-          organizers: [...event.organizers, newCollaborator],
-        });
-        setNewCollaborator('');
-        fetchEvents();
-      }
-    } catch (err) {
-      setError('Failed to add collaborator.');
-      console.error('Error adding collaborator:', err);
-    }
-  };
-
-  const handleCreateEvent = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleCreateEvent = async () => {
     if (!currentUser) return setError('Please log in to create an event.');
     setLoading(true);
-    setError(null);
     try {
-      let imageUrl = '';
-      if (newEvent.image) {
+      let imageUrl = newEvent.croppedImage || userPhotoURL || '';
+      if (newEvent.image && !newEvent.croppedImage) {
         const storageRef = ref(storage, `events/${newEvent.image.name}-${Date.now()}`);
         await uploadBytes(storageRef, newEvent.image);
         imageUrl = await getDownloadURL(storageRef);
       }
       const eventData = {
         title: newEvent.title,
+        location: newEvent.location,
         date: newEvent.date,
         description: newEvent.description,
-        category: newEvent.category,
+        category: 'Refreshments',
         userId: currentUser.uid,
-        organizers: [currentUser.uid],
+        organizers: [currentUser.uid, ...newEvent.organizers],
         visibility: newEvent.visibility,
         inviteLink: `https://eventify.com/invite/${Date.now()}`,
         invitedUsers: [],
@@ -212,93 +161,69 @@ function Events() {
         createdAt: new Date().toISOString(),
       };
       const docRef = await addDoc(collection(db, 'events'), eventData);
-      setNewEvent({ title: '', date: '', description: '', category: 'Refreshments', visibility: 'public', image: null });
-      setShowCreateForm(false);
-      setShowOptions(docRef.id);
+      await createGroupChat(docRef.id, newEvent.title, [currentUser.uid, ...newEvent.organizers], eventData.invitedUsers);
+      setNewEvent({
+        title: '',
+        location: '',
+        date: '',
+        visibility: 'public',
+        organizers: [],
+        inviteLink: '',
+        image: null,
+        description: '',
+        croppedImage: null,
+      });
+      setStep(1);
+      setShowCreateEventModal(false);
       fetchEvents();
     } catch (err: any) {
-      setError('Failed to create event: ' + err.message);
-      console.error('Error creating event:', err);
+      console.error('Detailed error in handleCreateEvent:', err);
+      setError(`Failed to create event: ${err.message}`);
     } finally {
       setLoading(false);
     }
   };
 
-  const handlePostMedia = async (eventId: string) => {
-    if (!currentUser || !newPost[eventId]?.media) return setError('Please select a media file.');
-    setLoading(true);
-    setError(null);
+  const onCropComplete = (_croppedArea: any, croppedAreaPixels: any) => {
+    setCroppedAreaPixels(croppedAreaPixels);
+  };
+
+  const getCroppedImg = async () => {
+    if (!croppedAreaPixels) {
+      throw new Error('Cropped area is not defined');
+    }
+    const canvas = document.createElement('canvas');
+    const image = new Image();
+    image.src = URL.createObjectURL(newEvent.image!);
+    await new Promise((resolve) => (image.onload = resolve));
+    canvas.width = croppedAreaPixels.width;
+    canvas.height = croppedAreaPixels.height;
+    const ctx = canvas.getContext('2d');
+    ctx?.drawImage(
+      image,
+      croppedAreaPixels.x,
+      croppedAreaPixels.y,
+      croppedAreaPixels.width,
+      croppedAreaPixels.height,
+      0,
+      0,
+      croppedAreaPixels.width,
+      croppedAreaPixels.height
+    );
+    return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), 'image/jpeg'));
+  };
+
+  const handleCropImage = async () => {
     try {
-      const event = events.find((e) => e.id === eventId);
-      const visibility = event?.visibility === 'private' ? 'private' : newPost[eventId].visibility;
-      const storageRef = ref(storage, `posts/${eventId}/${newPost[eventId].media.name}-${Date.now()}`);
-      await uploadBytes(storageRef, newPost[eventId].media);
-      const mediaUrl = await getDownloadURL(storageRef);
-      const postData = {
-        userId: currentUser.uid,
-        mediaUrl,
-        type: newPost[eventId].media.type.startsWith('video') ? 'video' : 'photo',
-        visibility,
-        likes: [],
-        comments: [],
-        createdAt: new Date().toISOString(),
-      };
-      await addDoc(collection(db, 'events', eventId, 'posts'), postData);
-      setNewPost((prev) => ({ ...prev, [eventId]: { media: null, visibility: 'public' } }));
-      fetchEvents();
+      const croppedBlob = await getCroppedImg();
+      const croppedFile = new File([croppedBlob as Blob], 'cropped.jpg', { type: 'image/jpeg' });
+      const storageRef = ref(storage, `events/cropped-${Date.now()}.jpg`);
+      await uploadBytes(storageRef, croppedFile);
+      const url = await getDownloadURL(storageRef);
+      setNewEvent((prev) => ({ ...prev, croppedImage: url }));
+      handleNextStep();
     } catch (err: any) {
-      setError('Failed to post media: ' + err.message);
-      console.error('Error posting media:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleLike = async (eventId: string, postId: string) => {
-    if (!currentUser) return setError('Please log in to like posts.');
-    try {
-      const postRef = doc(db, 'events', eventId, 'posts', postId);
-      const post = posts[eventId]?.findadir((p) => p.id === postId);
-      if (post) {
-        const likes = post.likes.includes(currentUser.uid)
-          ? post.likes.filter((id) => id !== currentUser.uid)
-          : [...post.likes, currentUser.uid];
-        await updateDoc(postRef, { likes });
-        fetchEvents();
-      }
-    } catch (err) {
-      setError('Failed to update like.');
-      console.error('Error liking post:', err);
-    }
-  };
-
-  const handleComment = async (eventId: string, postId: string, text: string) => {
-    if (!currentUser || !text.trim()) return setError('Please log in and enter a comment.');
-    try {
-      const postRef = doc(db, 'events', eventId, 'posts', postId);
-      const post = posts[eventId]?.find((p) => p.id === postId);
-      if (post) {
-        const comments = [...post.comments, { userId: currentUser.uid, text }];
-        await updateDoc(postRef, { comments });
-        fetchEvents();
-      }
-    } catch (err) {
-      setError('Failed to add comment.');
-      console.error('Error adding comment:', err);
-    }
-  };
-
-  const handleOptionSelect = (category: string) => {
-    navigate(`/business?category=${category}`);
-    setShowOptions(null);
-  };
-
-  const getCategoryColor = (category?: EventData['category']) => {
-    switch (category) {
-      case 'Refreshments': return 'bg-refreshments-lightBlue';
-      case 'Catering/Food': return 'bg-catering-orange';
-      case 'Venue Provider': return 'bg-venue-green';
-      default: return 'bg-gray-500'; // Default for undefined
+      setError('Failed to crop image: ' + err.message);
     }
   };
 
@@ -311,12 +236,26 @@ function Events() {
             <p className="text-lg mt-2">Discover and join exciting events.</p>
           </motion.div>
           {currentUser && (
-            <button
-              className="bg-secondary-deepRed text-neutral-lightGray px-4 py-2 rounded hover:bg-secondary-darkRed"
-              onClick={() => setShowCreateForm(true)}
-            >
-              Create Event
-            </button>
+            <div className="relative flex items-center group">
+              <button
+                onClick={() => setShowCreateEventModal(true)}
+                className="text-accent-gold hover:text-secondary-deepRed transition-colors"
+                aria-label="Create Event"
+              >
+                <FaPlus size={24} />
+              </button>
+              <AnimatePresence>
+                <motion.span
+                  variants={textVariants}
+                  initial="hidden"
+                  animate="visible"
+                  exit="exit"
+                  className="ml-2 text-accent-gold text-lg overflow-hidden whitespace-nowrap"
+                >
+                  Create Event
+                </motion.span>
+              </AnimatePresence>
+            </div>
           )}
         </div>
       </section>
@@ -330,70 +269,35 @@ function Events() {
             placeholder="Search events by title..."
             className="w-full p-3 pr-10 rounded bg-primary-navy text-neutral-lightGray border border-accent-gold focus:outline-none focus:ring-2 focus:ring-accent-gold"
           />
-          {searchQuery && (
+          <input
+            type="date"
+            value={searchDate}
+            onChange={handleDateSearch}
+            placeholder="Search by date (MM-DD)..."
+            className="w-full p-3 mt-2 rounded bg-primary-navy text-neutral-lightGray border border-accent-gold focus:outline-none focus:ring-2 focus:ring-accent-gold"
+          />
+          {searchQuery || searchDate ? (
             <button
               onClick={clearSearch}
               className="absolute right-3 top-1/2 transform -translate-y-1/2 text-accent-gold hover:text-secondary-deepRed"
               aria-label="Clear search"
             >
-              <svg
-                className="w-5 h-5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-                xmlns="http://www.w3.org/2000/svg"
-              >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
               </svg>
             </button>
-          )}
+          ) : null}
         </motion.div>
 
         <motion.p className="text-center text-neutral-lightGray mb-6" initial="hidden" animate="visible" variants={fadeIn}>
           {filteredEvents.length} {filteredEvents.length === 1 ? 'event' : 'events'} found
         </motion.p>
 
-        <div className="flex flex-wrap gap-4 mb-6">
-          <button
-            className={`px-4 py-2 rounded ${filter === null ? 'bg-secondary-deepRed' : 'bg-gray-500'} text-neutral-lightGray hover:bg-secondary-darkRed`}
-            onClick={() => handleFilter(null)}
-          >
-            All
-          </button>
-          <button
-            className={`px-4 py-2 rounded ${filter === 'Refreshments' ? 'bg-refreshments-lightBlue' : 'bg-gray-500'} text-neutral-darkGray hover:bg-refreshments-lightBlue`}
-            onClick={() => handleFilter('Refreshments')}
-          >
-            Refreshments
-          </button>
-          <button
-            className={`px-4 py-2 rounded ${filter === 'Catering/Food' ? 'bg-catering-orange' : 'bg-gray-500'} text-neutral-darkGray hover:bg-catering-orange`}
-            onClick={() => handleFilter('Catering/Food')}
-          >
-            Catering/Food
-          </button>
-          <button
-            className={`px-4 py-2 rounded ${filter === 'Venue Provider' ? 'bg-venue-green' : 'bg-gray-500'} text-neutral-darkGray hover:bg-venue-green`}
-            onClick={() => handleFilter('Venue Provider')}
-          >
-            Venue Provider
-          </button>
-        </div>
-
         {loading && (
           <div className="text-center">
-            <svg
-              className="animate-spin h-8 w-8 text-accent-gold mx-auto"
-              xmlns="http://www.w3.org/2000/svg"
-              fill="none"
-              viewBox="0 0 24 24"
-            >
+            <svg className="animate-spin h-8 w-8 text-accent-gold mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-              <path
-                className="opacity-75"
-                fill="currentColor"
-                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-              />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
             </svg>
             <p>Loading events...</p>
           </div>
@@ -403,206 +307,33 @@ function Events() {
           <motion.div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" initial="hidden" animate="visible" variants={stagger}>
             {filteredEvents.length > 0 ? (
               filteredEvents.map((event) => (
-                <motion.div key={event.id} className="bg-neutral-offWhite text-neutral-darkGray p-4 rounded shadow" variants={fadeIn}>
-                  <div className={`${getCategoryColor(event.category)} h-2 rounded-t`}></div>
-                  {event.image ? (
-                    <img
-                      src={event.image}
-                      alt={event.title}
-                      className="w-full h-40 object-cover rounded-t mt-2"
-                      onError={(e) => (e.currentTarget.src = 'https://picsum.photos/300/200')}
-                    />
-                  ) : (
-                    <FaCalendarAlt className="w-full h-40 text-gray-400 mt-2" />
-                  )}
-                  <h3 className="text-xl font-semibold mt-2">{event.title}</h3>
-                  <p className="text-sm text-accent-gold">{event.date || event.createdAt}</p>
-                  <p className="mt-2">{event.description || 'No description available'}</p>
-                  <p className="text-sm mt-1">
-                    {event.visibility === 'public' ? 'Public Event' : 'Private Event'}
-                  </p>
-
-                  <div className="mt-4">
-                    <label className="text-sm">Share Invite:</label>
-                    <input
-                      type="text"
-                      value={event.inviteLink || ''}
-                      readOnly
-                      className="w-full p-2 rounded bg-white text-neutral-darkGray mt-1"
-                      aria-label="Event Invite Link"
-                    />
-                    <div className="mt-2 flex justify-center">
-                      <CustomQRCode value={event.inviteLink || ''} imageUrl={event.image} size={120} />
-                    </div>
+                <motion.div key={event.id} className="bg-neutral-offWhite text-neutral-darkGray rounded shadow" variants={fadeIn}>
+                  <div className="relative w-full h-64">
+                    <img src={event.image || 'https://picsum.photos/300/200'} alt={event.title} className="w-full h-full object-cover rounded-t" />
+                    <span className="absolute top-2 right-2 bg-black bg-opacity-75 text-white px-2 py-1 rounded">
+                      {event.visibility === 'public' ? 'Public' : 'Private'}
+                    </span>
                   </div>
-
-                  {currentUser && (event.organizers.includes(currentUser.uid) || event.invitedUsers.includes(currentUser.uid)) && (
-                    <div className="mt-4">
-                      <h4 className="text-lg font-semibold">Post Media</h4>
-                      <label htmlFor={`media-${event.id}`} className="block text-sm mt-2">
-                        Upload Photo or Video:
-                      </label>
-                      <input
-                        id={`media-${event.id}`}
-                        type="file"
-                        accept="image/*,video/*"
-                        onChange={(e) =>
-                          setNewPost((prev) => ({
-                            ...prev,
-                            [event.id]: { ...prev[event.id], media: e.target.files?.[0] || null, visibility: prev[event.id]?.visibility || 'public' },
-                          }))
-                        }
-                        className="w-full p-2"
-                      />
-                      {event.visibility === 'public' && (
-                        <>
-                          <label htmlFor={`visibility-${event.id}`} className="block text-sm mt-2">Visibility:</label>
-                          <select
-                            id={`visibility-${event.id}`}
-                            value={newPost[event.id]?.visibility || 'public'}
-                            onChange={(e) =>
-                              setNewPost((prev) => ({
-                                ...prev,
-                                [event.id]: { ...prev[event.id], visibility: e.target.value as 'public' | 'private' },
-                              }))
-                            }
-                            className="w-full p-2 rounded bg-white text-neutral-darkGray mt-2"
-                          >
-                            <option value="public">Public</option>
-                            <option value="private">Private</option>
-                          </select>
-                        </>
-                      )}
-                      <button
-                        className="mt-2 w-full bg-secondary-deepRed text-neutral-lightGray px-4 py-2 rounded hover:bg-secondary-darkRed"
-                        onClick={() => handlePostMedia(event.id)}
-                        disabled={loading || !newPost[event.id]?.media}
-                      >
-                        {loading ? 'Posting...' : 'Post'}
-                      </button>
-                    </div>
-                  )}
-
-                  {posts[event.id]?.length > 0 && (
-                    <div className="mt-4">
-                      <h4 className="text-lg font-semibold">Event Posts</h4>
-                      <div className="space-y-4 mt-2">
-                        {posts[event.id].map((post) => (
-                          <div key={post.id} className="bg-white p-3 rounded shadow-sm">
-                            {post.type === 'photo' ? (
-                              <img src={post.mediaUrl} alt="Event Post" className="w-full h-40 object-cover rounded" />
-                            ) : (
-                              <video src={post.mediaUrl} controls className="w-full h-40 rounded" />
-                            )}
-                            <div className="flex justify-between items-center mt-2">
-                              <button
-                                className="flex items-center space-x-1"
-                                onClick={() => handleLike(event.id, post.id)}
-                                aria-label={`Like post by ${post.userId}`}
-                                disabled={!currentUser}
-                              >
-                                <FaHeart
-                                  className={post.likes.includes(currentUser?.uid || '') ? 'text-red-600' : 'text-gray-400'}
-                                />
-                                <span>{post.likes.length}</span>
-                              </button>
-                              <span className="flex items-center space-x-1">
-                                <FaComment className="text-gray-400" />
-                                <span>{post.comments.length}</span>
-                              </span>
-                            </div>
-                            {post.comments.map((comment, idx) => (
-                              <p key={idx} className="text-sm mt-1">
-                                <strong>{comment.userId}:</strong> {comment.text}
-                              </p>
-                            ))}
-                            {currentUser ? (
-                              <>
-                                <label htmlFor={`comment-${post.id}`} className="sr-only">
-                                  Add a comment
-                                </label>
-                                <input
-                                  id={`comment-${post.id}`}
-                                  type="text"
-                                  placeholder="Add a comment..."
-                                  onKeyPress={(e) => {
-                                    if (e.key === 'Enter' && e.currentTarget.value) {
-                                      handleComment(event.id, post.id, e.currentTarget.value);
-                                      e.currentTarget.value = '';
-                                    }
-                                  }}
-                                  className="w-full p-1 mt-2 rounded bg-neutral-offWhite text-neutral-darkGray"
-                                />
-                              </>
-                            ) : (
-                              <p className="text-sm mt-2">Log in to comment.</p>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {currentUser && event.organizers.includes(currentUser.uid) ? (
-                    <>
-                      <button
-                        className="mt-4 w-full bg-secondary-deepRed text-neutral-lightGray px-4 py-2 rounded hover:bg-secondary-darkRed"
-                        disabled={true}
-                      >
-                        You’re an Organizer
-                      </button>
-                      {event.pendingInvites.length > 0 && (
-                        <div className="mt-4">
-                          <p className="text-sm">Pending Invites:</p>
-                          {event.pendingInvites.map((userId) => (
-                            <div key={userId} className="flex justify-between items-center mt-1">
-                              <span>{userId}</span>
-                              <button
-                                className="bg-green-600 text-white px-2 py-1 rounded hover:bg-green-700"
-                                onClick={() => approveInvite(event.id, userId)}
-                              >
-                                Approve
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      <div className="mt-4">
-                        <label htmlFor={`collaborator-${event.id}`} className="block text-sm">
-                          Collaborator UID:
-                        </label>
-                        <input
-                          id={`collaborator-${event.id}`}
-                          type="text"
-                          value={newCollaborator}
-                          onChange={(e) => setNewCollaborator(e.target.value)}
-                          placeholder="Enter UID"
-                          className="w-full p-2 rounded bg-white text-neutral-darkGray"
-                        />
-                        <button
-                          className="mt-2 w-full bg-secondary-deepRed text-neutral-lightGray px-4 py-2 rounded hover:bg-secondary-darkRed"
-                          onClick={() => addCollaborator(event.id)}
-                        >
-                          Add Collaborator
-                        </button>
-                      </div>
-                    </>
-                  ) : currentUser && event.invitedUsers.includes(currentUser.uid) ? (
+                  <div className="p-4">
+                    <h3 className="text-xl font-semibold">{event.title}</h3>
+                    <p className="text-sm text-accent-gold">{event.date || event.createdAt}</p>
+                    <p className="mt-2">{event.location || 'No location'}</p>
+                  </div>
+                  {currentUser && event.visibility === 'public' && !event.invitedUsers.includes(currentUser.uid) && !event.organizers.includes(currentUser.uid) ? (
                     <button
-                      className="mt-4 w-full bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700"
-                      disabled={true}
-                    >
-                      You’re Invited
-                    </button>
-                  ) : (
-                    <button
-                      className="mt-4 w-full bg-secondary-deepRed text-neutral-lightGray px-4 py-2 rounded hover:bg-secondary-darkRed"
+                      className="w-full bg-secondary-deepRed text-neutral-lightGray px-4 py-2 rounded hover:bg-secondary-darkRed"
                       onClick={() => requestInvite(event.id)}
-                      disabled={currentUser ? event.pendingInvites.includes(currentUser.uid) : false}
                     >
-                      {currentUser && event.pendingInvites.includes(currentUser.uid) ? 'Invite Requested' : 'Request Invite'}
+                      Request Invite
                     </button>
-                  )}
+                  ) : currentUser && (event.invitedUsers.includes(currentUser.uid) || event.organizers.includes(currentUser.uid)) && event.visibility === 'private' ? (
+                    <button
+                      className="w-full bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700"
+                      onClick={() => navigate(`/chat/${event.id}`)}
+                    >
+                      Go to Event Chat
+                    </button>
+                  ) : null}
                 </motion.div>
               ))
             ) : (
@@ -614,120 +345,234 @@ function Events() {
         )}
       </section>
 
-      {showCreateForm && (
+      {showCreateEventModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4">
-          <div className="bg-neutral-offWhite text-neutral-darkGray p-6 rounded shadow-lg max-w-md w-full">
-            <h2 className="text-2xl font-bold mb-4">Create New Event</h2>
-            {error && <p className="text-red-500 mb-4">{error}</p>}
-            <form onSubmit={handleCreateEvent} className="space-y-4">
-              <label htmlFor="title" className="block text-sm">Event Title:</label>
-              <input
-                id="title"
-                type="text"
-                value={newEvent.title}
-                onChange={(e) => setNewEvent({ ...newEvent, title: e.target.value })}
-                placeholder="Enter title"
-                className="w-full p-2 rounded bg-white text-neutral-darkGray"
-                required
-              />
-              <label htmlFor="date" className="block text-sm">Date:</label>
-              <input
-                id="date"
-                type="date"
-                value={newEvent.date}
-                onChange={(e) => setNewEvent({ ...newEvent, date: e.target.value })}
-                className="w-full p-2 rounded bg-white text-neutral-darkGray"
-                required
-              />
-              <label htmlFor="description" className="block text-sm">Description:</label>
-              <textarea
-                id="description"
-                value={newEvent.description}
-                onChange={(e) => setNewEvent({ ...newEvent, description: e.target.value })}
-                placeholder="Enter description"
-                className="w-full p-2 rounded bg-white text-neutral-darkGray"
-                rows={3}
-              />
-              <label htmlFor="category" className="block text-sm">Category:</label>
-              <select
-                id="category"
-                value={newEvent.category}
-                onChange={(e) => setNewEvent({ ...newEvent, category: e.target.value as EventData['category'] })}
-                className="w-full p-2 rounded bg-white text-neutral-darkGray"
-              >
-                <option value="Refreshments">Refreshments</option>
-                <option value="Catering/Food">Catering/Food</option>
-                <option value="Venue Provider">Venue Provider</option>
-              </select>
-              <label htmlFor="visibility" className="block text-sm">Visibility:</label>
-              <select
-                id="visibility"
-                value={newEvent.visibility}
-                onChange={(e) => setNewEvent({ ...newEvent, visibility: e.target.value as 'public' | 'private' })}
-                className="w-full p-2 rounded bg-white text-neutral-darkGray"
-              >
-                <option value="public">Public</option>
-                <option value="private">Private</option>
-              </select>
-              <label htmlFor="image" className="block text-sm">Event Image:</label>
-              <input
-                id="image"
-                type="file"
-                accept="image/*"
-                onChange={(e) => setNewEvent({ ...newEvent, image: e.target.files?.[0] || null })}
-                className="w-full p-2"
-              />
-              <button
-                type="submit"
-                className="w-full bg-secondary-deepRed text-neutral-lightGray p-2 rounded hover:bg-secondary-darkRed"
-                disabled={loading}
-              >
-                {loading ? 'Creating...' : 'Create Event'}
-              </button>
-              <button
-                type="button"
-                className="w-full bg-gray-500 text-neutral-lightGray p-2 rounded hover:bg-gray-600"
-                onClick={() => setShowCreateForm(false)}
-                disabled={loading}
-              >
-                Cancel
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {showOptions && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4">
-          <div className="bg-neutral-offWhite text-neutral-darkGray p-6 rounded shadow-lg max-w-md w-full">
-            <h2 className="text-2xl font-bold mb-4">Event Created!</h2>
-            <p className="mb-4">What would you like to do next?</p>
-            <div className="space-y-4">
-              <button
-                className="w-full bg-refreshments-lightBlue text-neutral-darkGray p-2 rounded hover:bg-refreshments-lightBlue/80"
-                onClick={() => handleOptionSelect('Refreshments')}
-              >
-                Add Refreshments
-              </button>
-              <button
-                className="w-full bg-catering-orange text-neutral-darkGray p-2 rounded hover:bg-catering-orange/80"
-                onClick={() => handleOptionSelect('Catering/Food')}
-              >
-                Order Food
-              </button>
-              <button
-                className="w-full bg-venue-green text-neutral-darkGray p-2 rounded hover:bg-venue-green/80"
-                onClick={() => handleOptionSelect('Venue Provider')}
-              >
-                Book a Venue
-              </button>
-              <button
-                className="w-full bg-gray-500 text-neutral-lightGray p-2 rounded hover:bg-gray-600"
-                onClick={() => setShowOptions(null)}
-              >
-                Close
-              </button>
+          <div className="bg-neutral-offWhite text-neutral-darkGray p-6 rounded-3xl shadow-lg max-w-md w-full">
+            {/* Progress Bar */}
+            <div className="mb-6">
+              <div className="relative flex items-center justify-between">
+                {[1, 2, 3, 4].map((stepNum, index) => (
+                  <div key={stepNum} className="flex flex-col items-center relative">
+                    {/* Step Circle */}
+                    <div
+                      className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold transition-all duration-300 ${
+                        stepNum <= step
+                          ? 'bg-secondary-deepRed text-white'
+                          : 'bg-gray-300 text-gray-500'
+                      }`}
+                    >
+                      {stepNum < step ? <FaCheck size={14} /> : stepNum}
+                    </div>
+                    {/* Step Label (Number Only) */}
+                    <span className="text-xs mt-1 text-neutral-darkGray">{stepNum}</span>
+                    {/* Progress Line Between Steps */}
+                    {index < 3 && (
+                      <div
+                        className={`absolute top-4 left-1/2 w-[calc(100%+16px)] h-1 transform translate-x-4 ${
+                          stepNum < step ? 'bg-secondary-deepRed' : 'bg-gray-300'
+                        }`}
+                      />
+                    )}
+                  </div>
+                ))}
+              </div>
             </div>
+
+            <div className="flex justify-between mb-4">
+              <h2 className="text-2xl font-bold">
+                {step === 1 && ': Event Details'}
+                {step === 2 && ': Collaborators'}
+                {step === 3 && ': Image & Description'}
+                {step === 4 && ': Confirmation'}
+              </h2>
+            </div>
+            {error && <p className="text-red-500 mb-4">{error}</p>}
+            {step === 1 && (
+              <form className="space-y-4">
+                <label htmlFor="title" className="block text-neutral-darkGray">Event Title:</label>
+                <input
+                  id="title"
+                  value={newEvent.title}
+                  onChange={(e) => setNewEvent({ ...newEvent, title: e.target.value })}
+                  className="w-full p-3 rounded-xl bg-white text-neutral-darkGray border border-gray-300 focus:outline-none focus:ring-2 focus:ring-accent-gold"
+                  required
+                />
+                <label htmlFor="location" className="block text-neutral-darkGray">Location:</label>
+                <input
+                  id="location"
+                  value={newEvent.location}
+                  onChange={(e) => setNewEvent({ ...newEvent, location: e.target.value })}
+                  className="w-full p-3 rounded-xl bg-white text-neutral-darkGray border border-gray-300 focus:outline-none focus:ring-2 focus:ring-accent-gold"
+                  required
+                />
+                <label htmlFor="date" className="block text-neutral-darkGray">Date:</label>
+                <input
+                  id="date"
+                  type="date"
+                  value={newEvent.date}
+                  onChange={(e) => setNewEvent({ ...newEvent, date: e.target.value })}
+                  className="w-full p-3 rounded-xl bg-white text-neutral-darkGray border border-gray-300 focus:outline-none focus:ring-2 focus:ring-accent-gold"
+                  required
+                />
+                <label htmlFor="visibility" className="block text-neutral-darkGray">Visibility:</label>
+                <select
+                  id="visibility"
+                  value={newEvent.visibility}
+                  onChange={(e) => setNewEvent({ ...newEvent, visibility: e.target.value as 'public' | 'private' })}
+                  className="w-full p-3 rounded-xl bg-white text-neutral-darkGray border border-gray-300 focus:outline-none focus:ring-2 focus:ring-accent-gold"
+                >
+                  <option value="public">Public</option>
+                  <option value="private">Private</option>
+                </select>
+                <button type="button" onClick={handleNextStep} className="w-full bg-accent-gold text-white p-3 rounded-xl hover:bg-opacity-90 transition-all">
+                  Next
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowCreateEventModal(false)}
+                  className="w-full bg-gray-500 text-white p-3 rounded-xl hover:bg-opacity-90 transition-all mt-2"
+                >
+                  Cancel
+                </button>
+              </form>
+            )}
+            {step === 2 && (
+              <div className="space-y-4">
+                <p className="text-neutral-darkGray">Would you like to invite collaborators?</p>
+                <button
+                  onClick={() => {
+                    setNewEvent({ ...newEvent, organizers: newEvent.organizers });
+                    handleNextStep();
+                  }}
+                  className="w-full bg-gray-500 text-white p-3 rounded-xl hover:bg-opacity-90 transition-all"
+                >
+                  No
+                </button>
+                <button
+                  onClick={handleNextStep}
+                  className="w-full bg-accent-gold text-white p-3 rounded-xl hover:bg-opacity-90 transition-all"
+                >
+                  Yes
+                </button>
+                {followers.length > 0 && (
+                  <div>
+                    <h3 className="text-neutral-darkGray">Followers:</h3>
+                    {followers.map((follower) => (
+                      <div key={follower.displayName} className="flex items-center justify-between py-2">
+                        <span>{follower.displayName}</span>
+                        <FaPlus
+                          className="cursor-pointer text-accent-gold"
+                          onClick={() => setNewEvent((prev) => ({ ...prev, organizers: [...prev.organizers, follower.displayName] }))}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <button
+                  onClick={() => {/* Implement share link logic */}}
+                  className="w-full bg-accent-gold text-white p-3 rounded-xl hover:bg-opacity-90 transition-all mt-4"
+                >
+                  Create Share Link
+                </button>
+                <button type="button" onClick={handlePrevStep} className="w-full bg-gray-500 text-white p-3 rounded-xl hover:bg-opacity-90 transition-all mt-4">
+                  Back
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowCreateEventModal(false)}
+                  className="w-full bg-gray-500 text-white p-3 rounded-xl hover:bg-opacity-90 transition-all mt-2"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+            {step === 3 && (
+              <div className="space-y-4">
+                <p className="text-neutral-darkGray">Upload and crop an image (optional):</p>
+                <label htmlFor="image-upload" className="block text-neutral-darkGray mb-1">
+                  Choose an image:
+                </label>
+                <input
+                  id="image-upload"
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => setNewEvent({ ...newEvent, image: e.target.files?.[0] || null })}
+                  className="w-full p-3 rounded-xl border border-gray-300"
+                />
+                {newEvent.image && (
+                  <div className="relative w-full h-64 rounded-xl overflow-hidden">
+                    <Cropper
+                      image={URL.createObjectURL(newEvent.image)}
+                      crop={crop}
+                      zoom={zoom}
+                      aspect={4 / 3}
+                      onCropChange={setCrop}
+                      onZoomChange={setZoom}
+                      onCropComplete={onCropComplete}
+                    />
+                  </div>
+                )}
+                <button
+                  onClick={handleCropImage}
+                  className="w-full bg-accent-gold text-white p-3 rounded-xl hover:bg-opacity-90 transition-all"
+                  disabled={!newEvent.image}
+                >
+                  Crop and Next
+                </button>
+                <label htmlFor="description" className="block text-neutral-darkGray">Description (optional):</label>
+                <textarea
+                  id="description"
+                  value={newEvent.description}
+                  onChange={(e) => setNewEvent({ ...newEvent, description: e.target.value })}
+                  className="w-full p-3 rounded-xl bg-white text-neutral-darkGray border border-gray-300 focus:outline-none focus:ring-2 focus:ring-accent-gold"
+                  rows={3}
+                />
+                <button type="button" onClick={() => { handleNextStep(); }} className="w-full bg-gray-500 text-white p-3 rounded-xl hover:bg-opacity-90 transition-all mt-2">
+                  Skip for Now
+                </button>
+                <button type="button" onClick={handlePrevStep} className="w-full bg-gray-500 text-white p-3 rounded-xl hover:bg-opacity-90 transition-all mt-2">
+                  Back
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowCreateEventModal(false)}
+                  className="w-full bg-gray-500 text-white p-3 rounded-xl hover:bg-opacity-90 transition-all mt-2"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+            {step === 4 && (
+              <div className="space-y-4">
+                <div className="relative w-full h-64 bg-neutral-offWhite rounded-xl overflow-hidden">
+                  <img
+                    src={newEvent.croppedImage || userPhotoURL || 'https://picsum.photos/300/200'}
+                    alt="Event Preview"
+                    className="w-full h-full object-cover"
+                  />
+                  <span className="absolute top-2 right-2 bg-black bg-opacity-75 text-white px-2 py-1 rounded-xl">
+                    {newEvent.visibility === 'public' ? 'Public' : 'Private'}
+                  </span>
+                </div>
+                <h3 className="text-xl font-semibold">{newEvent.title}</h3>
+                <p className="text-sm text-accent-gold">{newEvent.date}</p>
+                <p>{newEvent.location}</p>
+                <p>{newEvent.description || 'No description'}</p>
+                <button onClick={handleCreateEvent} className="w-full bg-accent-gold text-white p-3 rounded-xl hover:bg-opacity-90 transition-all" disabled={loading}>
+                  {loading ? 'Creating...' : 'Create Event'}
+                </button>
+                <button type="button" onClick={handlePrevStep} className="w-full bg-gray-500 text-white p-3 rounded-xl hover:bg-opacity-90 transition-all mt-2">
+                  Back
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowCreateEventModal(false)}
+                  className="w-full bg-gray-500 text-white p-3 rounded-xl hover:bg-opacity-90 transition-all mt-2"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}

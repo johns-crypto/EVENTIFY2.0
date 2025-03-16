@@ -1,0 +1,19 @@
+.chat-media {
+    max-width: 100%;
+    height: auto;
+    margin-top: 0.5rem;
+    border-radius: 0.5rem;
+    filter: brightness(100%) contrast(100%) saturate(100%);
+  }
+  /* src/pages/Chat.css or global stylesheet */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
