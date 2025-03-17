@@ -10,7 +10,7 @@ interface AuthContextType {
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   register: (email: string, password: string, displayName?: string) => Promise<void>;
-  userProfile: { name?: string; profilePicture?: string } | null;
+  userProfile: { name?: string; profilePicture?: string; bio?: string } | null; // Added bio
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -19,20 +19,19 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [userProfile, setUserProfile] = useState<{ name?: string; profilePicture?: string } | null>(null);
+  const [userProfile, setUserProfile] = useState<{ name?: string; profilePicture?: string; bio?: string } | null>(null);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
-      // Avoid async directly in the callback to prevent channel issues
       setCurrentUser(user);
       if (user) {
-        // Fetch user data in a separate async function
         const fetchUserProfile = async () => {
           try {
             const userData = await getUserData(user.uid);
             setUserProfile({
               name: userData?.displayName || user.displayName || user.email?.split('@')[0],
-              profilePicture: userData?.photoURL || user.photoURL || undefined, // Fixed field name to match firebase.ts
+              profilePicture: userData?.photoURL || user.photoURL || undefined,
+              bio: userData?.bio || '', // Added bio
             });
           } catch (err: any) {
             console.error('Error fetching user profile:', err);
@@ -44,7 +43,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       } else {
         setUserProfile(null);
       }
-      setLoading(false); // Set loading false after initial auth check
+      setLoading(false);
     });
 
     return () => unsubscribe();
@@ -60,6 +59,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       setUserProfile({
         name: userData?.displayName || user.displayName || user.email?.split('@')[0],
         profilePicture: userData?.photoURL || user.photoURL || undefined,
+        bio: userData?.bio || '', // Added bio
       });
       toast.success('Logged in successfully!');
     } catch (err: any) {
@@ -76,9 +76,11 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     try {
       const user = await registerUser(email, password, displayName);
       setCurrentUser(user);
+      const userData = await getUserData(user.uid);
       setUserProfile({
-        name: displayName || user.displayName || user.email?.split('@')[0],
-        profilePicture: user.photoURL || undefined,
+        name: userData?.displayName || displayName || user.displayName || user.email?.split('@')[0],
+        profilePicture: userData?.photoURL || user.photoURL || undefined,
+        bio: userData?.bio || '', // Added bio
       });
       toast.success('Registered successfully!');
     } catch (err: any) {

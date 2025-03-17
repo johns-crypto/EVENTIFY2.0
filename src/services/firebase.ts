@@ -1,4 +1,3 @@
-// src/services/firebase.ts
 import { initializeApp } from 'firebase/app';
 import {
   getAuth,
@@ -135,6 +134,7 @@ export interface BusinessData {
   description: string;
   ownerId: string;
   products: ProductData[];
+  photoURL?: string; // Added photoURL field
 }
 
 export interface UserData {
@@ -428,6 +428,7 @@ export const getBusinesses = async (): Promise<BusinessData[]> => {
         description: data.description || '',
         ownerId: data.ownerId || 'unknown',
         products: data.products || [],
+        photoURL: data.photoURL || '', // Added photoURL
       } as BusinessData;
     });
     return businessList;

@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import Navbar from './Navbar';
+import Navbar from './Sidebar';
 import { AuthProvider } from '../context/AuthContext';
 
 test('renders navigation links', () => {

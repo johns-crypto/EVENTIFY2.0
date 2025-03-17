@@ -1,10 +1,8 @@
-// src/App.tsx
 import { Suspense, lazy, Component, ReactNode } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
-import Navbar from './components/Navbar';
-import Footer from './components/Footer';
+import Sidebar from './components/Sidebar';
 import { AuthProvider } from './context/AuthContext';
 
 // Lazy-loaded components
@@ -56,37 +54,36 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
 function App() {
   return (
     <AuthProvider>
-      <div className="min-h-screen flex flex-col bg-neutral-darkGray">
-        <Navbar />
-        <main className="flex-grow">
-          <ErrorBoundary>
-            <Suspense
-              fallback={
-                <div className="flex items-center justify-center min-h-[50vh]">
-                  <svg
-                    className="animate-spin h-8 w-8 text-accent-gold"
-                    xmlns="http://www.w3.org/2000/svg"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                  >
-                    <circle
-                      className="opacity-25"
-                      cx="12"
-                      cy="12"
-                      r="10"
-                      stroke="currentColor"
-                      strokeWidth="4"
-                    />
-                    <path
-                      className="opacity-75"
-                      fill="currentColor"
-                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                    />
-                  </svg>
-                  <span className="ml-2 text-neutral-lightGray">Loading...</span>
-                </div>
-              }
-            >
+      <div className="flex flex-col min-h-screen bg-neutral-darkGray">
+        <ErrorBoundary>
+          <Suspense
+            fallback={
+              <div className="flex items-center justify-center min-h-[50vh]">
+                <svg
+                  className="animate-spin h-8 w-8 text-accent-gold"
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                >
+                  <circle
+                    className="opacity-25"
+                    cx="12"
+                    cy="12"
+                    r="10"
+                    stroke="currentColor"
+                    strokeWidth="4"
+                  />
+                  <path
+                    className="opacity-75"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                  />
+                </svg>
+                <span className="ml-2 text-neutral-lightGray">Loading...</span>
+              </div>
+            }
+          >
+            <Sidebar>
               <Routes>
                 <Route path="/" element={<Home />} />
                 <Route path="/events" element={<Events />} />
@@ -105,10 +102,9 @@ function App() {
                 <Route path="/media-editor" element={<MediaEditor />} />
                 <Route path="*" element={<div className="text-neutral-lightGray text-center mt-20">404 - Not Found</div>} />
               </Routes>
-            </Suspense>
-          </ErrorBoundary>
-        </main>
-        <Footer />
+            </Sidebar>
+          </Suspense>
+        </ErrorBoundary>
         <ToastContainer
           position="top-right"
           autoClose={3000}
