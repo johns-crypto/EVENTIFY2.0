@@ -1,251 +1,313 @@
-import { useState, useRef, ChangeEvent } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { storage } from '../services/firebase';
-import { motion } from 'framer-motion';
-import { FaCrop, FaSave } from 'react-icons/fa';
+import { useState, useCallback } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { FaTimes } from 'react-icons/fa';
+import { useSwipeable } from 'react-swipeable';
+import Cropper from 'react-easy-crop';
+import Slider from 'rc-slider';
+import 'rc-slider/assets/index.css';
 import { toast } from 'react-toastify';
-import ReactCrop, { Crop, PixelCrop } from 'react-image-crop';
-import 'react-image-crop/dist/ReactCrop.css';
 
-function MediaEditor() {
-  const navigate = useNavigate();
-  const [file, setFile] = useState<File | null>(null);
-  const [src, setSrc] = useState<string | null>(null);
-  const [crop, setCrop] = useState<Crop>({ unit: '%', width: 50, height: 50, x: 25, y: 25 });
-  const [completedCrop, setCompletedCrop] = useState<PixelCrop | null>(null);
-  const [imgRef, setImgRef] = useState<HTMLImageElement | null>(null);
-  const [filter, setFilter] = useState<string>('');
-  const [text, setText] = useState<string>('');
-  const [trimStart, setTrimStart] = useState<number>(0);
-  const [trimEnd, setTrimEnd] = useState<number>(0);
-  const [loading, setLoading] = useState<boolean>(false);
-  const videoRef = useRef<HTMLVideoElement>(null);
+interface MediaEdits {
+  brightness: number;
+  contrast: number;
+  saturation: number;
+}
 
-  const handleFileUpload = (e: ChangeEvent<HTMLInputElement>) => {
-    const selectedFile = e.target.files?.[0];
-    if (selectedFile) {
-      setFile(selectedFile);
-      const url = URL.createObjectURL(selectedFile);
-      setSrc(url);
-      if (selectedFile.type.startsWith('video') && videoRef.current) {
-        videoRef.current.onloadedmetadata = () => setTrimEnd(videoRef.current?.duration || 0);
-      }
+interface MediaEditorProps {
+  mediaFile: File | null;
+  setMediaFile: (file: File | null) => void;
+  showMediaEditor: boolean;
+  setShowMediaEditor: (show: boolean) => void;
+  setOverlayText: (text: string) => void;
+  setDescription: (description: string) => void;
+  setVisibility: (visibility: 'private' | 'public') => void;
+  overlayText: string;
+  description: string;
+  visibility: 'private' | 'public';
+}
+
+function MediaEditor({
+  mediaFile,
+  setMediaFile,
+  showMediaEditor,
+  setShowMediaEditor,
+  setOverlayText,
+  setDescription,
+  setVisibility,
+  overlayText,
+  description,
+  visibility,
+}: MediaEditorProps) {
+  const [crop, setCrop] = useState({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(1);
+  const [croppedAreaPixels, setCroppedAreaPixels] = useState<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  const [mediaEdits, setMediaEdits] = useState<MediaEdits>({
+    brightness: 100,
+    contrast: 100,
+    saturation: 100,
+  });
+
+  const onCropComplete = useCallback(
+    (_croppedArea: any, croppedAreaPixels: any) => {
+      setCroppedAreaPixels(croppedAreaPixels);
+    },
+    []
+  );
+
+  const getCroppedImg = useCallback(async () => {
+    if (!croppedAreaPixels || !mediaFile) {
+      throw new Error('Cropped area or media file is not defined');
     }
-  };
-
-  const onImageLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
-    setImgRef(e.currentTarget);
-  };
-
-  const handleCropChange = (_: PixelCrop, percentCrop: Crop) => {
-    setCrop(percentCrop);
-  };
-
-  const handleCropComplete = (crop: PixelCrop) => {
-    setCompletedCrop(crop);
-  };
-
-  const saveMedia = async () => {
-    if (!file || (!completedCrop && !file.type.startsWith('video'))) {
-      toast.error('Please upload a file and complete editing.');
-      return;
-    }
-
-    setLoading(true);
-    try {
-      const isVideo = file.type.startsWith('video');
-      const storagePath = `editedMedia/${Date.now()}_${file.name}`;
-      const storageRef = ref(storage, storagePath);
-
-      if (isVideo) {
-        // Note: Trimming requires server-side processing (e.g., FFmpeg), not implemented here
-        await uploadBytes(storageRef, file);
-        const url = await getDownloadURL(storageRef);
-        toast.success('Video saved (trimming not applied - requires server-side processing)!');
-        navigate('/chat');
-        return url;
-      }
-
-      if (!imgRef || !completedCrop) {
-        throw new Error('Image reference or crop data missing.');
-      }
-
-      const canvas = document.createElement('canvas');
-      const scaleX = imgRef.naturalWidth / imgRef.width;
-      const scaleY = imgRef.naturalHeight / imgRef.height;
-      canvas.width = completedCrop.width * scaleX;
-      canvas.height = completedCrop.height * scaleY;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) throw new Error('Failed to get canvas context');
-
-      ctx.filter = filter;
+    const canvas = document.createElement('canvas');
+    const image = new Image();
+    image.src = URL.createObjectURL(mediaFile);
+    await new Promise((resolve) => (image.onload = resolve));
+    canvas.width = croppedAreaPixels.width;
+    canvas.height = croppedAreaPixels.height;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
       ctx.drawImage(
-        imgRef,
-        completedCrop.x * scaleX,
-        completedCrop.y * scaleY,
-        completedCrop.width * scaleX,
-        completedCrop.height * scaleY,
+        image,
+        croppedAreaPixels.x,
+        croppedAreaPixels.y,
+        croppedAreaPixels.width,
+        croppedAreaPixels.height,
         0,
         0,
-        canvas.width,
-        canvas.height
+        croppedAreaPixels.width,
+        croppedAreaPixels.height
       );
-
-      if (text) {
-        ctx.font = '30px Arial';
-        ctx.fillStyle = 'white';
-        ctx.fillText(text, 20, 50);
-      }
-
-      const blob = await new Promise<Blob>((resolve) => canvas.toBlob((b) => resolve(b!), 'image/jpeg'));
-      await uploadBytes(storageRef, blob);
-      const url = await getDownloadURL(storageRef);
-      toast.success('Image saved!');
-      navigate('/chat');
-      return url;
-    } catch (error: any) {
-      toast.error('Failed to save media: ' + error.message);
-      console.error('Error saving media:', error);
-    } finally {
-      setLoading(false);
     }
+    return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), 'image/jpeg'));
+  }, [croppedAreaPixels, mediaFile]);
+
+  const applyMediaEdits = useCallback(async () => {
+    try {
+      const croppedBlob = await getCroppedImg();
+      if (croppedBlob) {
+        const croppedFile = new File([croppedBlob as Blob], 'cropped.jpg', {
+          type: 'image/jpeg',
+        });
+        setMediaFile(croppedFile);
+        toast.success('Media edits applied successfully.');
+      }
+    } catch (err) {
+      toast.error(`Failed to apply edits: ${(err as Error).message}`);
+    }
+  }, [getCroppedImg, setMediaFile]);
+
+  const modalVariants = {
+    hidden: { opacity: 0, scale: 0.95 },
+    visible: { opacity: 1, scale: 1, transition: { duration: 0.3 } },
+    exit: { opacity: 0, scale: 0.95, transition: { duration: 0.2 } },
   };
 
-  const fadeIn = {
-    hidden: { opacity: 0, y: 20 },
-    visible: { opacity: 1, y: 0, transition: { duration: 0.6 } },
-  };
+  const mediaEditorHandlers = useSwipeable({
+    onSwipedDown: () => setShowMediaEditor(false),
+    delta: 50,
+  });
 
   return (
-    <div className="min-h-screen bg-neutral-darkGray py-12 px-4 sm:px-6 lg:px-8">
-      <motion.div className="max-w-6xl mx-auto flex" initial="hidden" animate="visible" variants={fadeIn}>
-        <div className="w-1/4 bg-primary-navy p-6 rounded-l-lg shadow-lg">
-          <h2 className="text-xl font-semibold text-accent-gold mb-4">Tools</h2>
-          {!file?.type.startsWith('video') && (
-            <>
-              <button
-                className="w-full p-2 mb-2 bg-secondary-deepRed text-neutral-lightGray rounded hover:bg-secondary-darkRed flex items-center justify-center"
-                aria-label="Crop Tool"
+    <AnimatePresence>
+      {showMediaEditor && mediaFile && (
+        <motion.div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-lg"
+          initial="hidden"
+          animate="visible"
+          exit="exit"
+          variants={modalVariants}
+          {...mediaEditorHandlers}
+        >
+          <div className="modal media-editor-modal">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-lg font-semibold">Edit Media</h2>
+              <motion.button
+                onClick={() => setShowMediaEditor(false)}
+                className="text-neutral-lightGray"
+                whileHover={{ scale: 1.1 }}
+                whileTap={{ scale: 0.9 }}
+                aria-label="Close media editor"
               >
-                <FaCrop size={20} className="mr-2" /> Crop
-              </button>
-              <div className="mb-2">
-                <label htmlFor="filterSelect" className="block text-sm text-neutral-lightGray mb-1">
-                  Filter
-                </label>
-                <select
-                  id="filterSelect"
-                  value={filter}
-                  onChange={(e) => setFilter(e.target.value)}
-                  className="w-full p-2 bg-secondary-deepRed text-neutral-lightGray rounded"
-                >
-                  <option value="">No Filter</option>
-                  <option value="grayscale(100%)">Grayscale</option>
-                  <option value="sepia(100%)">Sepia</option>
-                  <option value="blur(5px)">Blur</option>
-                </select>
-              </div>
-              <div className="mb-2">
-                <label htmlFor="textInput" className="block text-sm text-neutral-lightGray mb-1">
-                  Add Text
-                </label>
-                <input
-                  id="textInput"
-                  value={text}
-                  onChange={(e) => setText(e.target.value)}
-                  placeholder="Enter text"
-                  className="w-full p-2 bg-secondary-deepRed text-neutral-lightGray rounded"
-                />
-              </div>
-            </>
-          )}
-          {file?.type.startsWith('video') && (
-            <>
-              <div className="mb-2">
-                <label htmlFor="trimStart" className="block text-sm text-neutral-lightGray mb-1">
-                  Trim Start (s)
-                </label>
-                <input
-                  id="trimStart"
-                  type="number"
-                  value={trimStart}
-                  onChange={(e) => setTrimStart(Number(e.target.value))}
-                  placeholder="Start (s)"
-                  className="w-full p-2 bg-secondary-deepRed text-neutral-lightGray rounded"
-                  min={0}
-                />
-              </div>
-              <div className="mb-2">
-                <label htmlFor="trimEnd" className="block text-sm text-neutral-lightGray mb-1">
-                  Trim End (s)
-                </label>
-                <input
-                  id="trimEnd"
-                  type="number"
-                  value={trimEnd}
-                  onChange={(e) => setTrimEnd(Number(e.target.value))}
-                  placeholder="End (s)"
-                  className="w-full p-2 bg-secondary-deepRed text-neutral-lightGray rounded"
-                  min={trimStart}
-                />
-              </div>
-            </>
-          )}
-          <button
-            onClick={saveMedia}
-            className="w-full p-2 bg-accent-gold text-neutral-darkGray rounded hover:bg-yellow-600 flex items-center justify-center disabled:opacity-50"
-            disabled={!file || loading}
-            aria-label="Save Media"
-          >
-            <FaSave size={20} className="mr-2" />
-            {loading ? 'Saving...' : 'Save'}
-          </button>
-        </div>
-        <div className="flex-1 bg-primary-navy p-6 rounded-r-lg shadow-lg">
-          <h1 className="text-3xl font-bold text-accent-gold mb-6">Media Editor</h1>
-          <div className="mb-4">
-            <label htmlFor="fileInput" className="block text-sm text-neutral-lightGray mb-1">
-              Upload Media
-            </label>
-            <input
-              id="fileInput"
-              type="file"
-              accept="image/*,video/*"
-              onChange={handleFileUpload}
-              className="w-full p-2 text-neutral-lightGray bg-neutral-offWhite rounded"
-              disabled={loading}
-            />
-          </div>
-          {src && (
-            file.type.startsWith('video') ? (
-              <video
-                ref={videoRef}
-                src={src}
-                controls
-                className="max-w-full h-auto rounded"
-                onLoadedMetadata={() => setTrimEnd(videoRef.current?.duration || 0)}
-              />
-            ) : (
-              <ReactCrop
+                <FaTimes size={20} />
+              </motion.button>
+            </div>
+            <div className="cropper-container">
+              <Cropper
+                image={mediaFile ? URL.createObjectURL(mediaFile) : ''}
                 crop={crop}
-                onChange={handleCropChange}
-                onComplete={handleCropComplete}
-                aspect={1}
+                zoom={zoom}
+                aspect={4 / 3}
+                onCropChange={setCrop}
+                onZoomChange={setZoom}
+                onCropComplete={onCropComplete}
+                classes={{ mediaClassName: 'cropper-image' }}
+              />
+            </div>
+            <div className="slider-container">
+              <label className="block text-sm mb-1" htmlFor="zoom-slider">
+                Zoom
+              </label>
+              <Slider
+                id="zoom-slider"
+                min={1}
+                max={3}
+                step={0.1}
+                value={zoom}
+                onChange={(value: number | number[]) =>
+                  setZoom(Array.isArray(value) ? value[0] : value)
+                }
+                aria-label="Adjust zoom"
+              />
+            </div>
+            <div className="slider-container">
+              <label className="block text-sm mb-1" htmlFor="brightness-slider">
+                Brightness
+              </label>
+              <Slider
+                id="brightness-slider"
+                min={0}
+                max={200}
+                value={mediaEdits.brightness}
+                onChange={(value: number | number[]) =>
+                  setMediaEdits((prev) => ({
+                    ...prev,
+                    brightness: Array.isArray(value) ? value[0] : value,
+                  }))
+                }
+                aria-label="Adjust brightness"
+              />
+            </div>
+            <div className="slider-container">
+              <label className="block text-sm mb-1" htmlFor="contrast-slider">
+                Contrast
+              </label>
+              <Slider
+                id="contrast-slider"
+                min={0}
+                max={200}
+                value={mediaEdits.contrast}
+                onChange={(value: number | number[]) =>
+                  setMediaEdits((prev) => ({
+                    ...prev,
+                    contrast: Array.isArray(value) ? value[0] : value,
+                  }))
+                }
+                aria-label="Adjust contrast"
+              />
+            </div>
+            <div className="slider-container">
+              <label className="block text-sm mb-1" htmlFor="saturation-slider">
+                Saturation
+              </label>
+              <Slider
+                id="saturation-slider"
+                min={0}
+                max={200}
+                value={mediaEdits.saturation}
+                onChange={(value: number | number[]) =>
+                  setMediaEdits((prev) => ({
+                    ...prev,
+                    saturation: Array.isArray(value) ? value[0] : value,
+                  }))
+                }
+                aria-label="Adjust saturation"
+              />
+            </div>
+            <div className="mb-4">
+              <label className="block text-sm mb-1" htmlFor="overlay-text">
+                Overlay Text
+              </label>
+              <input
+                id="overlay-text"
+                type="text"
+                value={overlayText}
+                onChange={(e) => setOverlayText(e.target.value)}
+                placeholder="Add overlay text..."
+                className="input w-full"
+                aria-label="Add overlay text"
+              />
+            </div>
+            <div className="mb-4">
+              <label className="block text-sm mb-1" htmlFor="description">
+                Description
+              </label>
+              <textarea
+                id="description"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="Add a description..."
+                className="textarea w-full"
+                rows={3}
+                aria-label="Add a description"
+              />
+            </div>
+            <div className="mb-4">
+              <label className="block text-sm mb-1" htmlFor="visibility">
+                Visibility
+              </label>
+              <select
+                id="visibility"
+                value={visibility}
+                onChange={(e) =>
+                  setVisibility(e.target.value as 'private' | 'public')
+                }
+                className="select w-full"
+                aria-label="Select visibility"
               >
-                <img
-                  src={src}
-                  onLoad={onImageLoad}
-                  alt="Editable media"
-                  className="max-w-full h-auto"
-                  style={{ filter }} // Kept for filter preview, consider moving to CSS if expanded
-                />
-              </ReactCrop>
-            )
-          )}
-        </div>
-      </motion.div>
-    </div>
+                <option value="private">Private</option>
+                <option value="public">Public</option>
+              </select>
+            </div>
+            <div className="mb-4">
+              <label className="block text-sm mb-1">Preview</label>
+              <img
+                src={mediaFile ? URL.createObjectURL(mediaFile) : ''}
+                alt="Media preview"
+                className="media-preview"
+                style={
+                  {
+                    '--brightness': `${mediaEdits.brightness}%`,
+                    '--contrast': `${mediaEdits.contrast}%`,
+                    '--saturation': `${mediaEdits.saturation}%`,
+                  } as React.CSSProperties
+                }
+              />
+              {overlayText && (
+                <p className="font-semibold text-center mt-2">{overlayText}</p>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <motion.button
+                onClick={applyMediaEdits}
+                className="button button-primary flex-1"
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                aria-label="Apply media edits"
+              >
+                Apply Edits
+              </motion.button>
+              <motion.button
+                onClick={() => {
+                  setMediaFile(null);
+                  setShowMediaEditor(false);
+                }}
+                className="button button-secondary flex-1"
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                aria-label="Cancel media edits"
+              >
+                Cancel
+              </motion.button>
+            </div>
+          </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 }
 

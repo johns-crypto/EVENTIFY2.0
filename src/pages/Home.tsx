@@ -1,218 +1,312 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { useAuth } from '../context/AuthContext';
-import { Link, useNavigate } from 'react-router-dom';
-import { getEvents, EventData, getUserData, db, storage } from '../services/firebase';
-import { doc, setDoc, collection } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { Link } from 'react-router-dom';
+import { onSnapshot, collection, query, where, updateDoc, doc, arrayUnion, Timestamp, addDoc } from 'firebase/firestore';
 import { toast } from 'react-toastify';
+import defaultEventImage from '../assets/default-event.jpg';
+import { multiStepCreateEvent, MultiStepEventData } from '../services/eventCreation';
+import { db, getUserData } from '../services/firebase';
+import { FaCheck, FaUser, FaTimes, FaPlus } from 'react-icons/fa';
+import debounce from 'lodash/debounce';
+import { NormalizedEventData } from '../types'; // Use NormalizedEventData
+
+interface UserData {
+  displayName?: string;
+  photoURL?: string;
+  followers?: string[];
+}
+
+interface NotificationData {
+  id: string;
+  type: 'join_request';
+  eventId: string;
+  userId: string;
+  eventTitle: string;
+  userName: string;
+  message: string;
+  createdAt: string;
+  status: 'pending' | 'approved' | 'denied';
+}
+
+// Utility function to convert Timestamp to string
+const convertTimestampToString = (value: string | Timestamp): string => {
+  if (value instanceof Timestamp) {
+    return value.toDate().toISOString();
+  }
+  return value;
+};
 
 function Home() {
   const { currentUser } = useAuth();
-  const navigate = useNavigate();
-  const [events, setEvents] = useState<EventData[]>([]);
+  const [events, setEvents] = useState<NormalizedEventData[]>([]); // Use NormalizedEventData
   const [username, setUsername] = useState('');
-  const [loading, setLoading] = useState(true);
+  const [loadingEvents, setLoadingEvents] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [showModal, setShowModal] = useState(false);
-  const [formData, setFormData] = useState({
-    title: '',
-    date: '',
-    location: '',
-    image: null as File | null,
+  const [showMultiStepModal, setShowMultiStepModal] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [inputValue, setInputValue] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState('All');
+
+  const {
+    step,
+    newEvent,
+    setNewEvent,
+    handleNextStep,
+    handlePrevStep,
+    handleCreateEvent: multiStepHandleCreateEvent,
+    loading: multiStepLoading,
+    searchedImages,
+    followers,
+    followerNames,
+    createShareLink,
+    userPhotoURL,
+    selectedImageIndex,
+    setSelectedImageIndex,
+    searchImages,
+  } = multiStepCreateEvent({
+    userId: currentUser?.uid || '',
+    onSuccess: async (newEventData: NormalizedEventData) => {
+      setEvents((prev) => [newEventData, ...prev].slice(0, 4));
+      setShowMultiStepModal(false);
+      toast.success('Event created successfully!');
+    },
+    onError: (message: string) => {
+      setError(message);
+      toast.error(message);
+    },
   });
 
   const fadeIn = {
     hidden: { opacity: 0, y: 20 },
-    visible: { opacity: 1, y: 0, transition: { duration: 0.6 } },
+    visible: { opacity: 1, y: 0, transition: { duration: 0.4, ease: 'easeOut' } },
   };
 
   const stagger = {
-    visible: { transition: { staggerChildren: 0.2 } },
+    visible: { transition: { staggerChildren: 0.1 } },
   };
 
   const headingFade = {
-    hidden: { opacity: 0, y: -30 },
+    hidden: { opacity: 0, y: -20 },
     visible: {
       opacity: 1,
       y: 0,
-      transition: { duration: 0.8, ease: 'easeOut', type: 'spring', bounce: 0.3 },
+      transition: { duration: 0.5, ease: 'easeOut', type: 'spring', bounce: 0.2 },
     },
   };
 
-  useEffect(() => {
-    const fetchData = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        console.log('Fetching events, user:', currentUser?.uid);
-        const eventData = await getEvents();
-        console.log('Fetched events:', eventData);
-        setEvents(eventData);
-      } catch (err: any) {
-        setError('Failed to load events: ' + err.message);
-        console.error('Error fetching events:', err);
-        toast.error('Failed to load events.');
-      } finally {
-        setLoading(false);
-      }
+  const debouncedSetSearchTerm = useCallback(
+    debounce((value: string) => {
+      setSearchTerm(value);
+    }, 300),
+    []
+  );
 
-      if (currentUser) {
-        console.log('Fetching user data for:', currentUser.uid);
-        const userData = await getUserData(currentUser.uid);
-        setUsername(userData?.displayName || currentUser.email?.split('@')[0] || 'User');
-        if (!userData) console.warn('No user data found, using email fallback');
-        console.log('User data:', userData);
-      } else {
-        setUsername('');
-      }
+  useEffect(() => {
+    const fetchData = () => {
+      setLoadingEvents(true);
+      setError(null);
+      const today = new Date();
+
+      const q = query(collection(db, 'events'), where('visibility', '==', 'public'));
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        const eventData = snapshot.docs.map((doc) => {
+          const data = doc.data();
+
+          // Normalize createdAt and date to strings
+          const createdAt = convertTimestampToString(data.createdAt);
+          const eventDate = data.date ? convertTimestampToString(data.date) : createdAt;
+
+          return {
+            id: doc.id,
+            ...data,
+            createdAt,
+            date: eventDate,
+            pendingRequests: data.pendingRequests || [],
+          } as NormalizedEventData;
+        });
+
+        const filteredEvents = eventData
+          .filter((event) => {
+            const eventDate = new Date(event.date || event.createdAt);
+            return (
+              eventDate >= today &&
+              (selectedCategory === 'All' || event.category === selectedCategory) &&
+              (event.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                event.location?.toLowerCase().includes(searchTerm.toLowerCase()))
+            );
+          })
+          .sort((a, b) => new Date(b.date || b.createdAt).getTime() - new Date(a.date || a.createdAt).getTime())
+          .slice(0, 4);
+
+        setEvents(filteredEvents);
+        setLoadingEvents(false);
+      }, (err: any) => {
+        setError('Failed to load events: ' + err.message);
+        toast.error('Failed to load events');
+        setLoadingEvents(false);
+      });
+
+      return () => unsubscribe();
     };
 
     fetchData();
-  }, [currentUser, navigate]);
 
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const { name, value, files } = e.target;
-    setFormData((prev) => ({
-      ...prev,
-      [name]: files ? files[0] : value,
-    }));
-  };
+    if (currentUser) {
+      getUserData(currentUser.uid)
+        .then((userData: UserData | null) => {
+          setUsername(userData?.displayName || currentUser.email?.split('@')[0] || 'User');
+        })
+        .catch((err: any) => {
+          console.error('Error fetching user data:', err);
+          setUsername(currentUser.email?.split('@')[0] || 'User');
+        })
+        .finally(() => setLoadingEvents(false));
+    } else {
+      setUsername('');
+      setLoadingEvents(false);
+    }
+  }, [currentUser, selectedCategory, searchTerm]);
 
-  const handleCreateEvent = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleJoinEvent = useCallback(async (eventId: string) => {
     if (!currentUser) {
-      setError('Please log in to create an event.');
-      toast.error('Please log in to create an event.');
+      toast.error('Please log in to join an event.');
       return;
     }
 
-    setLoading(true);
-    setError(null);
     try {
-      const eventId = doc(collection(db, 'events')).id;
-      console.log('Creating event with ID:', eventId);
-      let imageUrl = '';
-      if (formData.image) {
-        try {
-          const storageRef = ref(storage, `events/${eventId}/${formData.image.name}`);
-          console.log('Uploading image to:', storageRef.fullPath);
-          await uploadBytes(storageRef, formData.image);
-          imageUrl = await getDownloadURL(storageRef);
-          console.log('Image URL:', imageUrl);
-        } catch (uploadErr: any) {
-          console.error('Image upload failed:', uploadErr);
-          toast.warn('Event created without image due to upload failure.');
-        }
+      const eventRef = doc(db, 'events', eventId);
+      const event = events.find((e) => e.id === eventId);
+      if (!event) {
+        toast.error('Event not found.');
+        return;
       }
 
-      const newEvent: EventData = {
-        id: eventId,
-        title: formData.title,
+      await updateDoc(eventRef, {
+        pendingRequests: arrayUnion(currentUser.uid),
+      });
+
+      const notificationData: Omit<NotificationData, 'id'> = {
+        type: 'join_request',
+        message: `${username || currentUser.email?.split('@')[0] || 'User'} requested to join your event: ${event.title}`,
+        eventId,
+        eventTitle: event.title,
         userId: currentUser.uid,
+        userName: username || currentUser.email?.split('@')[0] || 'User',
         createdAt: new Date().toISOString(),
-        date: formData.date,
-        location: formData.location,
-        image: imageUrl || '',
-        visibility: 'public',
-        organizers: [currentUser.uid],
-        invitedUsers: [],
-        pendingInvites: [],
+        status: 'pending',
       };
 
-      console.log('Saving event:', newEvent);
-      await setDoc(doc(db, 'events', eventId), newEvent);
-      setEvents((prev) => [newEvent, ...prev]);
-      setShowModal(false);
-      setFormData({ title: '', date: '', location: '', image: null });
-      toast.success('Event created successfully!');
-    } catch (err: any) {
-      setError('Failed to create event: ' + err.message);
-      console.error('Error creating event:', err);
-      toast.error('Failed to create event.');
-    } finally {
-      setLoading(false);
-    }
-  };
+      await addDoc(collection(db, 'users', event.userId, 'notifications'), notificationData);
 
-  if (loading) {
+      toast.success('Join request sent! Waiting for admin approval.');
+      setEvents((prev) =>
+        prev.map((e) =>
+          e.id === eventId ? { ...e, pendingRequests: [...(e.pendingRequests || []), currentUser.uid] } : e
+        )
+      );
+    } catch (err: any) {
+      toast.error('Failed to send join request: ' + err.message);
+    }
+  }, [currentUser, events, username]);
+
+  if (loadingEvents) {
     return (
-      <div className="min-h-screen bg-gradient-to-b from-neutral-darkGray/90 to-neutral-darkGray/70 backdrop-blur-md flex items-center justify-center">
-        <div className="flex items-center space-x-2">
+      <div className="min-h-screen bg-gradient-to-b from-gray-900 to-gray-800 flex items-center justify-center">
+        <div className="flex items-center space-x-3">
           <svg
-            className="animate-spin h-8 w-8 text-accent-gold"
+            className="animate-spin h-8 w-8 text-yellow-400"
             xmlns="http://www.w3.org/2000/svg"
             fill="none"
             viewBox="0 0 24 24"
           >
-            <circle
-              className="opacity-25"
-              cx="12"
-              cy="12"
-              r="10"
-              stroke="currentColor"
-              strokeWidth="4"
-            />
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
             <path
               className="opacity-75"
               fill="currentColor"
               d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
             />
           </svg>
-          <span className="text-neutral-lightGray text-lg">Loading...</span>
+          <span className="text-gray-300 text-base sm:text-lg font-medium">Loading Events...</span>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-neutral-darkGray/90 to-neutral-darkGray/70 backdrop-blur-md text-neutral-lightGray relative">
-      {/* Hero Section */}
+    <div className="min-h-screen bg-gradient-to-b from-gray-900 to-gray-800 text-gray-200 relative">
       <motion.section
-        className="py-8 px-2 sm:py-16 sm:px-4 relative z-10 transition-all duration-300"
+        className="py-8 px-4 sm:py-16 sm:px-6 relative z-10 bg-cover bg-center"
+        style={{
+          backgroundImage: `linear-gradient(to bottom, rgba(0, 0, 0, 0.7), rgba(0, 0, 0, 0.9)), url('https://images.unsplash.com/photo-1514525253161-7a46d19cd819?ixlib=rb-4.0.3&auto=format&fit=crop&w=1350&q=80')`,
+        }}
         initial="hidden"
         animate="visible"
         variants={fadeIn}
       >
         <motion.div
-          className="max-w-4xl mx-auto text-center backdrop-blur-md bg-gradient-to-b from-primary-navy/90 to-primary-navy/70 shadow-2xl rounded-xl p-6 sm:p-8 transition-all duration-300"
+          className="max-w-5xl mx-auto text-center bg-gray-800/60 backdrop-blur-lg rounded-2xl p-4 sm:p-8 shadow-xl border border-gray-700/50"
           variants={fadeIn}
         >
           <motion.h1
-            className="text-4xl sm:text-5xl font-bold text-accent-gold mb-4 sm:mb-6"
+            className="text-3xl sm:text-5xl font-extrabold text-yellow-400 mb-3 sm:mb-6 tracking-tight"
             initial="hidden"
             animate="visible"
             variants={headingFade}
           >
-            {currentUser ? `Welcome Back, ${username}!` : 'Discover Eventify'}
+            {currentUser ? `Welcome, ${username}!` : 'Discover Amazing Events'}
           </motion.h1>
-          <p className="text-lg sm:text-xl mb-6 sm:mb-8 text-neutral-lightGray">
+          <p className="text-base sm:text-xl mb-4 sm:mb-8 text-gray-300 leading-relaxed">
             {currentUser
-              ? 'Create, share, and join events with your community.'
-              : 'Join a world of events—sign up to get started!'}
+              ? 'Create and join events that bring your community together.'
+              : 'Sign up to explore and join events near you!'}
           </p>
-          {error && <p className="text-red-500 mb-4">{error}</p>}
-          {currentUser ? (
-            <motion.button
-              onClick={() => setShowModal(true)}
-              className="inline-block bg-accent-gold text-neutral-darkGray rounded-full px-6 py-3 hover:bg-accent-gold/80 transition-all"
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              disabled={loading}
+          {error && (
+            <motion.p
+              className="text-red-400 text-sm p-2 sm:p-3 bg-red-500/20 rounded-lg mb-4 sm:mb-6"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
             >
-              Create an Event
-            </motion.button>
+              {error}
+            </motion.p>
+          )}
+          {currentUser ? (
+            <div className="flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-4">
+              <motion.button
+                onClick={() => {
+                  setShowMultiStepModal(true);
+                  if (newEvent.title) searchImages(newEvent.title);
+                }}
+                className="bg-yellow-400 text-gray-900 font-semibold rounded-full px-5 py-2 sm:px-6 sm:py-3 hover:bg-yellow-300 transition-all shadow-lg min-w-[150px] sm:min-w-[180px] text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                disabled={multiStepLoading}
+                aria-label="Create a new event"
+              >
+                {multiStepLoading ? 'Creating...' : 'Create Event'}
+              </motion.button>
+              <Link
+                to="/profile"
+                className="flex items-center text-yellow-400 hover:text-yellow-300 transition-colors font-medium text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                aria-label={`View profile of ${username}`}
+              >
+                <FaUser className="mr-2" />
+                <span>{username}</span>
+              </Link>
+            </div>
           ) : (
-            <div className="flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:space-x-4">
+            <div className="flex flex-col sm:flex-row gap-3 sm:gap-4">
               <Link
                 to="/register"
-                className="inline-block bg-accent-gold text-neutral-darkGray rounded-full px-6 py-3 hover:bg-accent-gold/80 transition-all"
+                className="bg-yellow-400 text-gray-900 font-semibold rounded-full px-5 py-2 sm:px-6 sm:py-3 hover:bg-yellow-300 transition-all shadow-lg min-w-[150px] sm:min-w-[180px] text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                aria-label="Sign up for an account"
               >
                 Sign Up
               </Link>
               <Link
                 to="/login"
-                className="px-6 py-3 text-accent-gold border border-accent-gold rounded-full hover:bg-accent-gold hover:text-neutral-darkGray transition-colors"
+                className="px-5 py-2 sm:px-6 sm:py-3 text-yellow-400 border border-yellow-400 rounded-full hover:bg-yellow-400 hover:text-gray-900 transition-all shadow-lg font-medium min-w-[150px] sm:min-w-[180px] text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                aria-label="Log in to your account"
               >
                 Log In
               </Link>
@@ -221,66 +315,183 @@ function Home() {
         </motion.div>
       </motion.section>
 
-      {/* Upcoming Events Section */}
       <motion.section
-        className="py-8 px-2 sm:py-16 sm:px-4 relative z-0 -mt-12 sm:-mt-16 transition-all duration-300"
+        className="py-8 px-4 sm:py-12 sm:px-6 relative z-0 -mt-6 sm:-mt-10"
         initial="hidden"
         animate="visible"
         variants={stagger}
       >
         <motion.div
-          className="max-w-6xl mx-auto backdrop-blur-md bg-gradient-to-b from-primary-navy/90 to-primary-navy/70 shadow-2xl rounded-xl p-6 sm:p-8 transition-all duration-300"
+          className="max-w-6xl mx-auto bg-gray-800/50 backdrop-blur-lg rounded-2xl p-4 sm:p-8 shadow-xl border border-gray-700/50"
           variants={fadeIn}
         >
-          <motion.h2
-            className="text-2xl sm:text-3xl font-bold text-accent-gold mb-6 sm:mb-8 text-center"
-            initial="hidden"
-            animate="visible"
-            variants={headingFade}
-          >
-            Upcoming Events
-          </motion.h2>
+          {events.length > 0 && (
+            <motion.div
+              className="mb-6 sm:mb-8 relative h-64 sm:h-80 bg-gray-700/50 rounded-xl overflow-hidden shadow-lg"
+              variants={fadeIn}
+            >
+              <img
+                src={events[0].image || defaultEventImage}
+                alt={events[0].title}
+                className="w-full h-full object-cover"
+                loading="lazy"
+                onError={(e) => (e.currentTarget.src = defaultEventImage)}
+              />
+              <div className="absolute inset-0 bg-gradient-to-t from-black/70 to-transparent flex flex-col justify-end p-4 sm:p-6 text-white">
+                <h3 className="text-xl sm:text-2xl font-semibold line-clamp-1">{events[0].title}</h3>
+                <p className="text-sm sm:text-base mt-1 line-clamp-1">
+                  {new Date(events[0].date || events[0].createdAt).toLocaleDateString()}
+                </p>
+                <p className="text-sm sm:text-base line-clamp-1">{events[0].location || 'Location TBD'}</p>
+                <div className="flex gap-3 mt-3">
+                  <Link
+                    to={`/events/${events[0].id}`}
+                    className="inline-block bg-red-600 text-white px-4 sm:px-5 py-1 sm:py-2 rounded-full hover:bg-red-500 transition-all text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-red-500"
+                    aria-label={`Learn more about ${events[0].title}`}
+                  >
+                    Learn More
+                  </Link>
+                  <motion.button
+                    onClick={() => handleJoinEvent(events[0].id)}
+                    className="bg-green-500 text-white px-4 sm:px-5 py-1 sm:py-2 rounded-full hover:bg-green-600 transition-all text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-green-500"
+                    whileTap={{ scale: 0.95 }}
+                    disabled={(events[0].pendingRequests || []).includes(currentUser?.uid || '')}
+                    aria-label={`Request to join ${events[0].title}`}
+                  >
+                    {(events[0].pendingRequests || []).includes(currentUser?.uid || '') ? 'Pending' : 'Join'}
+                  </motion.button>
+                </div>
+              </div>
+            </motion.div>
+          )}
+
+          <div className="flex flex-col sm:flex-row items-center justify-between mb-4 sm:mb-6 gap-3 sm:gap-4">
+            <motion.h2
+              className="text-xl sm:text-3xl font-bold text-yellow-400"
+              initial="hidden"
+              animate="visible"
+              variants={headingFade}
+            >
+              Upcoming Events
+              <span className="bg-red-600 text-white px-2 sm:px-3 py-1 rounded-full text-xs sm:text-sm ml-2 sm:ml-3">
+                {events.length} Live
+              </span>
+            </motion.h2>
+            <div className="flex flex-col sm:flex-row gap-2 sm:gap-3 w-full sm:w-auto">
+              <input
+                type="text"
+                placeholder="Search events..."
+                value={inputValue}
+                onChange={(e) => {
+                  setInputValue(e.target.value);
+                  debouncedSetSearchTerm(e.target.value);
+                }}
+                className="w-full sm:w-56 p-2 sm:p-3 rounded-lg bg-gray-700 text-gray-200 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-yellow-400 transition-all text-sm sm:text-base"
+                aria-label="Search events by title or location"
+              />
+              <div className="relative">
+                <label htmlFor="category-select" className="sr-only">Select Category</label>
+                <select
+                  id="category-select"
+                  value={selectedCategory}
+                  onChange={(e) => setSelectedCategory(e.target.value)}
+                  className="w-full sm:w-36 p-2 sm:p-3 rounded-lg bg-gray-700 text-gray-200 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-yellow-400 transition-all text-sm sm:text-base"
+                  aria-label="Select event category"
+                >
+                  <option value="All">All Categories</option>
+                  <option value="Music">Music</option>
+                  <option value="Food">Food</option>
+                  <option value="Tech">Tech</option>
+                  <option value="General">General</option>
+                </select>
+              </div>
+            </div>
+          </div>
           {events.length > 0 ? (
-            <div className="flex gap-4 sm:gap-6 overflow-x-auto snap-x snap-mandatory">
-              {events.slice(0, 3).map((event) => (
+            <motion.div
+              className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 sm:gap-8"
+              initial="hidden"
+              animate="visible"
+              variants={stagger}
+            >
+              {events.slice(1).map((event) => (
                 <motion.div
                   key={event.id}
-                  className="flex-none w-72 snap-center backdrop-blur-md bg-gradient-to-b from-primary-navy/90 to-primary-navy/70 shadow-2xl rounded-xl overflow-hidden min-w-[280px]"
+                  className="relative h-72 sm:h-80 bg-gray-700/50 rounded-xl overflow-hidden shadow-lg transition-all duration-300 hover:shadow-2xl"
                   variants={fadeIn}
-                  whileHover={{ scale: 1.03, transition: { duration: 0.3 } }}
+                  whileTap={{ scale: 0.98 }}
                 >
                   <img
-                    src={event.image || 'https://placehold.co/300x200?text=Event:1'}
+                    src={event.image || defaultEventImage}
                     alt={event.title}
-                    className="w-full h-40 object-cover rounded-t"
-                    onError={(e) => {
-                      const target = e.target as HTMLImageElement;
-                      target.src = 'https://placehold.co/300x200?text=Event:Error'; // Fallback image
-                    }}
+                    className="w-full h-full object-cover"
+                    loading="lazy"
+                    onError={(e) => (e.currentTarget.src = defaultEventImage)}
                   />
-                  <div className="p-4">
-                    <h3 className="text-lg sm:text-xl font-semibold text-accent-gold">{event.title}</h3>
-                    <p className="text-sm mt-1 text-neutral-lightGray">{event.date || event.createdAt}</p>
-                    <p className="text-sm text-neutral-lightGray">{event.location || 'Location TBD'}</p>
-                    <Link
-                      to={`/events/${event.id}`}
-                      className="mt-4 inline-block text-secondary-deepRed hover:underline"
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/70 to-transparent flex flex-col justify-end p-3 sm:p-4 text-white">
+                    <motion.h3
+                      className="text-base sm:text-xl font-semibold line-clamp-1"
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.4, delay: 0.2 }}
                     >
-                      Learn More
-                    </Link>
+                      {event.title}
+                    </motion.h3>
+                    <motion.p
+                      className="text-xs sm:text-sm mt-1 line-clamp-1"
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.4, delay: 0.3 }}
+                    >
+                      {new Date(event.date || event.createdAt).toLocaleDateString()}
+                    </motion.p>
+                    <motion.p
+                      className="text-xs sm:text-sm line-clamp-1"
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.4, delay: 0.4 }}
+                    >
+                      {event.location || 'Location TBD'}
+                    </motion.p>
+                    <div className="flex gap-2 mt-2">
+                      <motion.a
+                        href={`/events/${event.id}`}
+                        className="inline-block bg-red-600 text-white px-3 sm:px-4 py-1 sm:py-1 rounded-full hover:bg-red-500 transition-all text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-red-500"
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.4, delay: 0.5 }}
+                        whileTap={{ scale: 0.95 }}
+                        aria-label={`Learn more about ${event.title}`}
+                      >
+                        Learn More
+                      </motion.a>
+                      <motion.button
+                        onClick={() => handleJoinEvent(event.id)}
+                        className="bg-green-500 text-white px-3 sm:px-4 py-1 sm:py-1 rounded-full hover:bg-green-600 transition-all text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.4, delay: 0.6 }}
+                        whileTap={{ scale: 0.95 }}
+                        disabled={(event.pendingRequests || []).includes(currentUser?.uid || '')}
+                        aria-label={`Request to join ${event.title}`}
+                      >
+                        {(event.pendingRequests || []).includes(currentUser?.uid || '') ? 'Pending' : 'Join'}
+                      </motion.button>
+                    </div>
                   </div>
                 </motion.div>
               ))}
-            </div>
+            </motion.div>
           ) : (
-            <p className="text-center text-neutral-lightGray">
-              No events yet. Be the first to create one!
+            <p className="text-center text-gray-400 text-sm sm:text-base">
+              No upcoming events found. Be the first to create one!
             </p>
           )}
           <div className="text-center mt-6 sm:mt-8">
             <Link
               to="/events"
-              className="inline-block bg-accent-gold text-neutral-darkGray rounded-full px-6 py-3 hover:bg-accent-gold/80 transition-all"
+              className="inline-block bg-yellow-400 text-gray-900 font-semibold rounded-full px-5 py-2 sm:px-6 sm:py-3 hover:bg-yellow-300 transition-all shadow-lg text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-yellow-400"
+              aria-label="Explore all events"
             >
               Explore All Events
             </Link>
@@ -288,93 +499,415 @@ function Home() {
         </motion.div>
       </motion.section>
 
-      {/* Modal for Creating Events */}
-      {showModal && currentUser && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 backdrop-blur-md flex items-center justify-center z-50">
+      {showMultiStepModal && currentUser && (
+        <div className="fixed inset-0 bg-black bg-opacity-70 backdrop-blur-sm flex items-center justify-center z-50 p-4 overflow-y-auto">
           <motion.div
-            className="bg-gradient-to-b from-primary-navy/90 to-primary-navy/70 shadow-2xl p-6 rounded-xl max-w-md w-full"
-            initial={{ opacity: 0, scale: 0.9 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.9 }}
+            className="bg-gray-800/90 backdrop-blur-lg rounded-2xl max-w-md w-full mx-2 p-4 sm:p-6 relative shadow-2xl border border-gray-700/50"
+            role="dialog"
+            aria-labelledby="multi-step-create-event-title"
+            initial={{ opacity: 0, scale: 0.95, y: 30 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.95, y: 30 }}
+            transition={{ type: 'spring', stiffness: 300, damping: 25 }}
           >
-            <h3 className="text-2xl font-bold text-accent-gold mb-4">Create New Event</h3>
-            {error && <p className="text-red-500 mb-4">{error}</p>}
-            <form onSubmit={handleCreateEvent} className="space-y-4">
-              <div>
-                <label htmlFor="title" className="block text-sm text-neutral-lightGray">Title</label>
-                <input
-                  id="title"
-                  type="text"
-                  name="title"
-                  value={formData.title}
-                  onChange={handleInputChange}
-                  className="w-full p-2 mt-1 bg-neutral-offWhite text-neutral-darkGray rounded"
-                  required
-                  minLength={3}
-                  placeholder="Enter event title (min 3 chars)"
-                  aria-label="Event Title"
-                />
-              </div>
-              <div>
-                <label htmlFor="date" className="block text-sm text-neutral-lightGray">Date</label>
-                <input
-                  id="date"
-                  type="date"
-                  name="date"
-                  value={formData.date}
-                  onChange={handleInputChange}
-                  className="w-full p-2 mt-1 bg-neutral-offWhite text-neutral-darkGray rounded"
-                  required
-                  min={new Date().toISOString().split('T')[0]}
-                  aria-label="Event Date"
-                />
-              </div>
-              <div>
-                <label htmlFor="location" className="block text-sm text-neutral-lightGray">Location</label>
-                <input
-                  id="location"
-                  type="text"
-                  name="location"
-                  value={formData.location}
-                  onChange={handleInputChange}
-                  className="w-full p-2 mt-1 bg-neutral-offWhite text-neutral-darkGray rounded"
-                  placeholder="Enter location (optional)"
-                  aria-label="Event Location"
-                />
-              </div>
-              <div>
-                <label htmlFor="image" className="block text-sm text-neutral-lightGray">Image (optional)</label>
-                <input
-                  id="image"
-                  type="file"
-                  name="image"
-                  onChange={handleInputChange}
-                  accept="image/*"
-                  className="w-full p-2 mt-1 text-neutral-lightGray"
-                  aria-label="Event Image"
-                />
-              </div>
-              <div className="flex justify-end space-x-2">
-                <motion.button
-                  type="button"
-                  onClick={() => setShowModal(false)}
-                  className="px-4 py-2 text-accent-gold border border-accent-gold rounded-full hover:bg-accent-gold hover:text-neutral-darkGray transition-colors"
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
+            <motion.button
+              type="button"
+              onClick={() => setShowMultiStepModal(false)}
+              className="absolute top-3 right-3 sm:top-4 sm:right-4 text-gray-400 hover:text-yellow-400 transition-colors z-10 focus:outline-none focus:ring-2 focus:ring-yellow-400"
+              whileHover={{ scale: 1.2, rotate: 90 }}
+              whileTap={{ scale: 0.9 }}
+              aria-label="Close modal"
+            >
+              <FaTimes size={20} />
+            </motion.button>
+
+            <motion.h3
+              id="multi-step-create-event-title"
+              className="text-xl sm:text-2xl font-bold text-yellow-400 mb-4 sm:mb-6 text-center"
+              initial={{ opacity: 0, y: -20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.2 }}
+            >
+              {step === 1 && 'Step 1: Event Details'}
+              {step === 2 && 'Step 2: Collaborators'}
+              {step === 3 && 'Step 3: Image & Description'}
+              {step === 4 && 'Step 4: Preview & Create'}
+            </motion.h3>
+
+            <div className="flex justify-between mb-4 sm:mb-6 relative">
+              {[1, 2, 3, 4].map((stepNum) => (
+                <div key={stepNum} className="flex flex-col items-center relative z-10">
+                  <motion.div
+                    className={`w-8 h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center text-xs sm:text-sm font-semibold transition-all duration-300 ${
+                      stepNum <= step ? 'bg-yellow-400 text-gray-900' : 'bg-gray-600 text-gray-300'
+                    }`}
+                    initial={{ scale: 0 }}
+                    animate={{ scale: 1 }}
+                    transition={{ delay: stepNum * 0.1 }}
+                  >
+                    {stepNum < step ? <FaCheck size={14} /> : stepNum}
+                  </motion.div>
+                  {stepNum < 4 && (
+                    <div
+                      className={`absolute top-4 sm:top-5 left-1/2 w-[calc(100%+16px)] sm:w-[calc(100%+20px)] h-1 transform translate-x-4 sm:translate-x-5 ${
+                        stepNum < step ? 'bg-yellow-400' : 'bg-gray-600'
+                      }`}
+                    />
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {error && (
+              <motion.p
+                className="text-red-400 text-xs sm:text-sm p-2 sm:p-3 bg-red-500/20 rounded-lg mb-3 sm:mb-4 text-center"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+              >
+                {error}
+              </motion.p>
+            )}
+
+            <div className="space-y-4 sm:space-y-6">
+              {step === 1 && (
+                <motion.form
+                  className="space-y-3 sm:space-y-4"
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: 0.3 }}
                 >
-                  Cancel
-                </motion.button>
-                <motion.button
-                  type="submit"
-                  className="bg-accent-gold text-neutral-darkGray rounded-full px-6 py-3 hover:bg-accent-gold/80 transition-all"
-                  disabled={loading || formData.title.length < 3 || !formData.date}
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
+                  <div>
+                    <label htmlFor="title" className="block text-xs sm:text-sm text-gray-300 mb-1">Event Title</label>
+                    <input
+                      id="title"
+                      value={newEvent.title}
+                      onChange={(e) => setNewEvent({ ...newEvent, title: e.target.value })}
+                      className="w-full p-2 sm:p-3 rounded-lg bg-gray-700 text-gray-200 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-yellow-400 transition-all text-sm sm:text-base"
+                      placeholder="Enter event title"
+                      required
+                      aria-required="true"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="location" className="block text-xs sm:text-sm text-gray-300 mb-1">Location</label>
+                    <input
+                      id="location"
+                      value={newEvent.location}
+                      onChange={(e) => setNewEvent({ ...newEvent, location: e.target.value })}
+                      className="w-full p-2 sm:p-3 rounded-lg bg-gray-700 text-gray-200 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-yellow-400 transition-all text-sm sm:text-base"
+                      placeholder="Enter location"
+                      required
+                      aria-required="true"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="date" className="block text-xs sm:text-sm text-gray-300 mb-1">Date</label>
+                    <input
+                      id="date"
+                      type="date"
+                      value={newEvent.date}
+                      onChange={(e) => setNewEvent({ ...newEvent, date: e.target.value })}
+                      className="w-full p-2 sm:p-3 rounded-lg bg-gray-700 text-gray-200 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-yellow-400 transition-all text-sm sm:text-base"
+                      required
+                      min={new Date().toISOString().split('T')[0]}
+                      aria-required="true"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="visibility" className="block text-xs sm:text-sm text-gray-300 mb-1">Visibility</label>
+                    <select
+                      id="visibility"
+                      value={newEvent.visibility}
+                      onChange={(e) => setNewEvent({ ...newEvent, visibility: e.target.value as 'public' | 'private' })}
+                      className="w-full p-2 sm:p-3 rounded-lg bg-gray-700 text-gray-200 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-yellow-400 transition-all text-sm sm:text-base"
+                      aria-label="Select event visibility"
+                    >
+                      <option value="public">Public</option>
+                      <option value="private">Private</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label htmlFor="category" className="block text-xs sm:text-sm text-gray-300 mb-1">Category</label>
+                    <select
+                      id="category"
+                      value={newEvent.category}
+                      onChange={(e) =>
+                        setNewEvent({
+                          ...newEvent,
+                          category: e.target.value as 'General' | 'Music' | 'Food' | 'Tech',
+                        })
+                      }
+                      className="w-full p-2 sm:p-3 rounded-lg bg-gray-700 text-gray-200 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-yellow-400 transition-all text-sm sm:text-base"
+                      aria-label="Select event category"
+                    >
+                      <option value="General">General</option>
+                      <option value="Music">Music</option>
+                      <option value="Food">Food</option>
+                      <option value="Tech">Tech</option>
+                    </select>
+                  </div>
+                  <motion.button
+                    type="button"
+                    onClick={() => {
+                      if (newEvent.title) searchImages(newEvent.title);
+                      handleNextStep();
+                    }}
+                    className="w-full bg-yellow-400 text-gray-900 p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    disabled={multiStepLoading || !newEvent.title || !newEvent.location || !newEvent.date}
+                    aria-label="Proceed to next step"
+                  >
+                    Next
+                  </motion.button>
+                  <motion.button
+                    type="button"
+                    onClick={() => setShowMultiStepModal(false)}
+                    className="w-full bg-gray-600 text-gray-300 p-2 sm:p-3 rounded-lg hover:bg-gray-500 transition-all text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-gray-500"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    aria-label="Cancel event creation"
+                  >
+                    Cancel
+                  </motion.button>
+                </motion.form>
+              )}
+              {step === 2 && (
+                <motion.div
+                  className="space-y-3 sm:space-y-4"
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: 0.3 }}
                 >
-                  {loading ? 'Creating...' : 'Create Event'}
-                </motion.button>
-              </div>
-            </form>
+                  <p className="text-gray-300 text-center text-sm sm:text-base">Would you like to invite collaborators?</p>
+                  <motion.button
+                    onClick={() => handleNextStep()}
+                    className="w-full bg-gray-600 text-gray-300 p-2 sm:p-3 rounded-lg hover:bg-gray-500 transition-all shadow-md text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-gray-500"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    aria-label="Skip inviting collaborators"
+                  >
+                    No
+                  </motion.button>
+                  {followers.length > 0 && (
+                    <motion.button
+                      onClick={handleNextStep}
+                      className="w-full bg-yellow-400 text-gray-900 p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                      aria-label="Invite collaborators"
+                    >
+                      Yes
+                    </motion.button>
+                  )}
+                  <div>
+                    <h3 className="text-xs sm:text-sm text-gray-300 mb-2">Your Followers:</h3>
+                    {followers.length > 0 ? (
+                      <div className="max-h-32 sm:max-h-40 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-800">
+                        {followers.map((followerId: string) => (
+                          <motion.div
+                            key={followerId}
+                            className="flex items-center justify-between py-1 sm:py-2 px-2 sm:px-3 bg-gray-700 rounded-lg mb-2"
+                            initial={{ opacity: 0, y: 10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ delay: 0.1 }}
+                          >
+                            <span className="text-xs sm:text-sm text-gray-300">{followerNames[followerId] || followerId}</span>
+                            <motion.button
+                              onClick={() =>
+                                setNewEvent((prev: MultiStepEventData) => {
+                                  if (!prev.organizers.includes(followerId)) {
+                                    return { ...prev, organizers: [...prev.organizers, followerId] };
+                                  }
+                                  return prev;
+                                })
+                              }
+                              className="text-yellow-400 hover:text-yellow-300 transition-colors focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                              whileHover={{ scale: 1.2 }}
+                              whileTap={{ scale: 0.9 }}
+                              aria-label={`Add ${followerNames[followerId] || followerId} as organizer`}
+                            >
+                              <FaPlus size={14} />
+                            </motion.button>
+                          </motion.div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-xs sm:text-sm text-gray-400 text-center">You have no followers yet.</p>
+                    )}
+                  </div>
+                  <p className="text-xs sm:text-sm text-gray-300 text-center">
+                    Selected Organizers: {newEvent.organizers.map((org: string) => followerNames[org] || org).join(', ') || 'None'}
+                  </p>
+                  <motion.button
+                    onClick={() => {
+                      const link = createShareLink();
+                      toast.success(`Invite link created: ${link}`);
+                    }}
+                    className="w-full bg-yellow-400 text-gray-900 p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    aria-label="Create share link for event"
+                  >
+                    Create Share Link
+                  </motion.button>
+                  <motion.button
+                    type="button"
+                    onClick={handlePrevStep}
+                    className="w-full bg-gray-600 text-gray-300 p-2 sm:p-3 rounded-lg hover:bg-gray-500 transition-all shadow-md text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-gray-500"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    aria-label="Go back to previous step"
+                  >
+                    Back
+                  </motion.button>
+                  <motion.button
+                    type="button"
+                    onClick={() => setShowMultiStepModal(false)}
+                    className="w-full bg-gray-600 text-gray-300 p-2 sm:p-3 rounded-lg hover:bg-gray-500 transition-all shadow-md text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-gray-500"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    aria-label="Cancel event creation"
+                  >
+                    Cancel
+                  </motion.button>
+                </motion.div>
+              )}
+              {step === 3 && (
+                <motion.div
+                  className="space-y-3 sm:space-y-4"
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: 0.3 }}
+                >
+                  <p className="text-gray-300 text-center text-sm sm:text-base">Select an image for your event:</p>
+                  {searchedImages.length > 0 ? (
+                    <div className="grid grid-cols-3 gap-2 sm:gap-3 max-h-40 sm:max-h-48 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-800">
+                      {searchedImages.map((url: string, index: number) => (
+                        <motion.img
+                          key={index}
+                          src={url}
+                          alt={`Event photo option ${index + 1}`}
+                          className={`w-full h-20 sm:h-24 object-cover rounded-lg cursor-pointer hover:opacity-90 transition-all ${
+                            selectedImageIndex === index ? 'border-4 border-yellow-400' : 'border-2 border-transparent'
+                          }`}
+                          onClick={() => {
+                            setSelectedImageIndex(index);
+                            setNewEvent({ ...newEvent, selectedImage: url });
+                          }}
+                          initial={{ opacity: 0, scale: 0.8 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          transition={{ delay: index * 0.1 }}
+                          whileTap={{ scale: 0.95 }}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs sm:text-sm text-gray-400 text-center">No images found. Please proceed.</p>
+                  )}
+                  <div>
+                    <label htmlFor="description" className="block text-xs sm:text-sm text-gray-300 mb-1 sm:mb-2">Description (optional)</label>
+                    <textarea
+                      id="description"
+                      value={newEvent.description}
+                      onChange={(e) => setNewEvent({ ...newEvent, description: e.target.value })}
+                      className="w-full p-2 sm:p-3 rounded-lg bg-gray-700 text-gray-200 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-yellow-400 transition-all text-sm sm:text-base"
+                      rows={3}
+                      placeholder="Describe your event..."
+                      aria-label="Event description"
+                    />
+                  </div>
+                  <motion.button
+                    type="button"
+                    onClick={handleNextStep}
+                    className="w-full bg-yellow-400 text-gray-900 p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    disabled={multiStepLoading || !newEvent.selectedImage}
+                    aria-label="Proceed to next step"
+                  >
+                    Next
+                  </motion.button>
+                  <motion.button
+                    type="button"
+                    onClick={handlePrevStep}
+                    className="w-full bg-gray-600 text-gray-300 p-2 sm:p-3 rounded-lg hover:bg-gray-500 transition-all shadow-md text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-gray-500"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    aria-label="Go back to previous step"
+                  >
+                    Back
+                  </motion.button>
+                  <motion.button
+                    type="button"
+                    onClick={() => setShowMultiStepModal(false)}
+                    className="w-full bg-gray-600 text-gray-300 p-2 sm:p-3 rounded-lg hover:bg-gray-500 transition-all shadow-md text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-gray-500"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    aria-label="Cancel event creation"
+                  >
+                    Cancel
+                  </motion.button>
+                </motion.div>
+              )}
+              {step === 4 && (
+                <motion.div
+                  className="space-y-3 sm:space-y-4"
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: 0.3 }}
+                >
+                  <p className="text-gray-300 text-center mb-3 sm:mb-4 text-sm sm:text-base">Preview your event:</p>
+                  <motion.div
+                    className="relative w-full h-72 sm:h-80 bg-gray-700/50 rounded-xl overflow-hidden shadow-lg transition-all duration-300"
+                    whileTap={{ scale: 0.98 }}
+                  >
+                    <img
+                      src={newEvent.selectedImage || userPhotoURL || defaultEventImage}
+                      alt={newEvent.title}
+                      className="w-full h-full object-cover"
+                      onError={(e) => (e.currentTarget.src = defaultEventImage)}
+                    />
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/70 to-transparent flex flex-col justify-end p-3 sm:p-4 text-white">
+                      <h3 className="text-base sm:text-xl font-semibold line-clamp-1">{newEvent.title}</h3>
+                      <p className="text-xs sm:text-sm mt-1 line-clamp-1">{new Date(newEvent.date).toLocaleDateString()}</p>
+                      <p className="text-xs sm:text-sm line-clamp-1">{newEvent.location || 'Location TBD'}</p>
+                      <p className="text-xs sm:text-sm line-clamp-2 mt-1">{newEvent.description || 'No description'}</p>
+                    </div>
+                  </motion.div>
+                  <motion.button
+                    onClick={multiStepHandleCreateEvent}
+                    className="w-full bg-yellow-400 text-gray-900 p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    disabled={multiStepLoading}
+                    aria-label="Create event"
+                  >
+                    {multiStepLoading ? 'Creating...' : 'Create Event'}
+                  </motion.button>
+                  <motion.button
+                    type="button"
+                    onClick={handlePrevStep}
+                    className="w-full bg-gray-600 text-gray-300 p-2 sm:p-3 rounded-lg hover:bg-gray-500 transition-all shadow-md text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-gray-500"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    aria-label="Go back to previous step"
+                  >
+                    Back
+                  </motion.button>
+                  <motion.button
+                    type="button"
+                    onClick={() => setShowMultiStepModal(false)}
+                    className="w-full bg-gray-600 text-gray-300 p-2 sm:p-3 rounded-lg hover:bg-gray-500 transition-all shadow-md text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-gray-500"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    aria-label="Cancel event creation"
+                  >
+                    Cancel
+                  </motion.button>
+                </motion.div>
+              )}
+            </div>
           </motion.div>
         </div>
       )}

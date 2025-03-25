@@ -1,579 +1,861 @@
-import { useState, useEffect } from 'react';
-import { doc, updateDoc, addDoc, collection } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { db, storage, getEvents, EventData, getUserData } from '../services/firebase';
-import { useAuth } from '../context/AuthContext';
-import { useNavigate } from 'react-router-dom';
-import { FaPlus, FaCheck } from 'react-icons/fa';
+// src/pages/Events.tsx
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import Cropper from 'react-easy-crop';
-import { createGroupChat } from '../services/firebase';
-
-interface UserData {
-  displayName: string;
-  email: string;
-  photoURL: string;
-  followers: string[];
-}
+import { useAuth } from '../context/AuthContext';
+import { onSnapshot, collection, query, QueryDocumentSnapshot, updateDoc, doc } from 'firebase/firestore';
+import { toast } from 'react-toastify';
+import defaultEventImage from '../assets/default-event.jpg';
+import { multiStepCreateEvent } from '../services/eventCreation';
+import { db } from '../services/firebase';
+import { EventData, MultiStepEventData, NormalizedEventData, EventCategory, ServiceData } from '../types';
+import { normalizeEventData } from '../utils/normalizeEvent';
+import { FaPlus, FaCheck, FaTimes, FaEllipsisH, FaComments } from 'react-icons/fa';
+import { Link, useNavigate } from 'react-router-dom';
 
 function Events() {
   const { currentUser } = useAuth();
   const navigate = useNavigate();
-  const [events, setEvents] = useState<EventData[]>([]);
-  const [filteredEvents, setFilteredEvents] = useState<EventData[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [events, setEvents] = useState<NormalizedEventData[]>([]);
+  const [accessibleEvents, setAccessibleEvents] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchDate, setSearchDate] = useState('');
-  const [showCreateEventModal, setShowCreateEventModal] = useState(false);
-  const [step, setStep] = useState(1);
-  const [userPhotoURL, setUserPhotoURL] = useState<string | null>(null);
-  const [newEvent, setNewEvent] = useState({
-    title: '',
-    location: '',
-    date: '',
-    visibility: 'public' as 'public' | 'private',
-    organizers: [] as string[],
-    inviteLink: '',
-    image: null as File | null,
-    description: '',
-    croppedImage: null as string | null,
+  const [showModal, setShowModal] = useState(false);
+  const [menuOpen, setMenuOpen] = useState<string | null>(null); // Track which event's menu is open
+  const modalRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  const handleSuccess = useCallback((newEventData: NormalizedEventData) => {
+    setEvents((prev) => [newEventData, ...prev].slice(0, 4));
+    setShowModal(false);
+    toast.success('Event created successfully!');
+  }, []);
+
+  const handleError = useCallback((message: string) => {
+    setError(message);
+    toast.error(message);
+  }, []);
+
+  const {
+    step,
+    newEvent,
+    setNewEvent,
+    handleNextStep,
+    handlePrevStep,
+    handleCreateEvent: multiStepHandleCreateEvent,
+    loading: multiStepLoading,
+    searchedImages,
+    followers,
+    followerNames,
+    createShareLink,
+    userPhotoURL,
+    selectedImageIndex,
+    setSelectedImageIndex,
+    searchImages,
+  } = multiStepCreateEvent({
+    userId: currentUser?.uid || '',
+    onSuccess: handleSuccess,
+    onError: handleError,
   });
-  const [followers, setFollowers] = useState<UserData[]>([]);
-  const [crop, setCrop] = useState({ x: 0, y: 0 });
-  const [zoom, setZoom] = useState(1);
-  const [croppedAreaPixels, setCroppedAreaPixels] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
 
-  const fadeIn = { hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 0, transition: { duration: 0.6 } } };
-  const stagger = { visible: { transition: { staggerChildren: 0.2 } } };
+  const fadeIn = {
+    hidden: { opacity: 0, y: 20 },
+    visible: { opacity: 1, y: 0, transition: { duration: 0.4, ease: 'easeOut' } },
+  };
+
+  const stagger = {
+    visible: { transition: { staggerChildren: 0.1 } },
+  };
+
   const headingFade = {
-    hidden: { opacity: 0, y: -30 },
-    visible: { opacity: 1, y: 0, transition: { duration: 0.8, ease: 'easeOut', type: 'spring', bounce: 0.3 } },
-  };
-  const textVariants = {
-    hidden: { opacity: 0, x: -10, width: 0 },
-    visible: { opacity: 1, x: 0, width: 'auto', transition: { duration: 0.3, ease: 'easeInOut' } },
-    exit: { opacity: 0, x: -10, width: 0, transition: { duration: 0.3, ease: 'easeInOut' } },
+    hidden: { opacity: 0, y: -20 },
+    visible: {
+      opacity: 1,
+      y: 0,
+      transition: { duration: 0.5, ease: 'easeOut', type: 'spring', bounce: 0.2 },
+    },
   };
 
+  // Fetch accessible events for the current user (for private events)
   useEffect(() => {
-    fetchEvents();
-  }, [currentUser]);
-
-  useEffect(() => {
-    if (currentUser) {
-      getUserData(currentUser.uid).then((user) => {
-        if (user) {
-          setUserPhotoURL(user.photoURL || 'https://picsum.photos/300/200');
-          setFollowers(user.followers.map((uid) => ({ displayName: uid, email: '', photoURL: '', followers: [] })));
-        }
-      });
+    if (!currentUser) {
+      setAccessibleEvents([]);
+      return;
     }
+
+    const userEventsQuery = query(collection(db, 'events'));
+    const unsubscribeUserEvents = onSnapshot(
+      userEventsQuery,
+      (snapshot) => {
+        const userEvents = snapshot.docs.map((doc) => ({
+          id: doc.id,
+          ...doc.data(),
+        })) as EventData[];
+        const accessible = userEvents
+          .filter(
+            (e) =>
+              e?.organizers?.includes(currentUser.uid) || e?.invitedUsers?.includes(currentUser.uid)
+          )
+          .map((e) => e.id);
+        setAccessibleEvents(accessible);
+      },
+      (err: any) => {
+        if (err.code === 'permission-denied') {
+          console.warn('Permission denied when fetching user-specific events. This may be expected for some events.');
+        } else {
+          console.error('Error fetching user events:', err);
+        }
+      }
+    );
+
+    return () => unsubscribeUserEvents();
   }, [currentUser]);
 
-  const fetchEvents = async () => {
+  // Fetch all events (public and private)
+  useEffect(() => {
+    if (!currentUser) {
+      setLoading(false);
+      setError('Please sign in to view events.');
+      navigate('/login');
+      return;
+    }
+
     setLoading(true);
     setError(null);
-    try {
-      const eventsData = await getEvents();
-      setEvents(eventsData);
-      filterEvents(eventsData);
-    } catch (err: any) {
-      setError('Failed to fetch events: ' + err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
+    const today = new Date();
 
-  const filterEvents = (eventsData: EventData[]) => {
-    let result = [...eventsData];
-    if (searchQuery) {
-      result = result.filter((e) => e.title.toLowerCase().includes(searchQuery.toLowerCase()));
-    }
-    if (searchDate) {
-      const [month, day] = searchDate.split('-');
-      result = result.filter((e) => {
-        const eventDate = new Date(e.date || e.createdAt).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit' });
-        return eventDate === `${month}-${day}`;
-      });
-    }
-    setFilteredEvents(result);
-  };
+    const eventsQuery = query(collection(db, 'events'));
+    const unsubscribeEvents = onSnapshot(
+      eventsQuery,
+      (snapshot) => {
+        const eventData = snapshot.docs.map((doc: QueryDocumentSnapshot) => {
+          const data = doc.data();
+          return normalizeEventData({ id: doc.id, ...data } as EventData);
+        });
 
-  const handleSearch = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const query = e.target.value;
-    setSearchQuery(query);
-    filterEvents(events);
-  };
+        // Filter events based on visibility and accessibility
+        const filteredEvents = eventData
+          .filter((event) => {
+            const eventDate = new Date(event.date || event.createdAt);
+            const isPublic = event.visibility === 'public';
+            const isAccessible = accessibleEvents.includes(event.id);
+            return eventDate >= today && (isPublic || isAccessible);
+          })
+          .sort((a, b) => new Date(b.date || b.createdAt).getTime() - new Date(a.date || a.createdAt).getTime())
+          .slice(0, 4);
 
-  const handleDateSearch = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const date = e.target.value;
-    setSearchDate(date);
-    filterEvents(events);
-  };
-
-  const clearSearch = () => {
-    setSearchQuery('');
-    setSearchDate('');
-    filterEvents(events);
-  };
-
-  const requestInvite = async (eventId: string) => {
-    if (!currentUser) return setError('Please log in to request an invite.');
-    try {
-      const eventRef = doc(db, 'events', eventId);
-      const event = events.find((e) => e.id === eventId);
-      if (event && !event.pendingInvites.includes(currentUser.uid)) {
-        await updateDoc(eventRef, { pendingInvites: [...event.pendingInvites, currentUser.uid] });
-        fetchEvents();
+        setEvents(filteredEvents);
+        setLoading(false);
+      },
+      (err: any) => {
+        if (err.code === 'permission-denied') {
+          setError('You do not have permission to view events. Please sign in.');
+          toast.error('Permission denied: Unable to access events.');
+          navigate('/login');
+        } else {
+          setError(`Failed to load events: ${err.message}. Check permissions or network.`);
+          toast.error(`Failed to load events: ${err.message}`);
+        }
+        setLoading(false);
       }
-    } catch (err) {
-      setError('Failed to request invite.');
-    }
-  };
-
-  const handleNextStep = () => setStep((prev) => prev + 1);
-  const handlePrevStep = () => setStep((prev) => prev - 1);
-
-  const handleCreateEvent = async () => {
-    if (!currentUser) return setError('Please log in to create an event.');
-    setLoading(true);
-    try {
-      let imageUrl = newEvent.croppedImage || userPhotoURL || '';
-      if (newEvent.image && !newEvent.croppedImage) {
-        const storageRef = ref(storage, `events/${newEvent.image.name}-${Date.now()}`);
-        await uploadBytes(storageRef, newEvent.image);
-        imageUrl = await getDownloadURL(storageRef);
-      }
-      const eventData = {
-        title: newEvent.title,
-        location: newEvent.location,
-        date: newEvent.date,
-        description: newEvent.description,
-        category: 'Refreshments',
-        userId: currentUser.uid,
-        organizers: [currentUser.uid, ...newEvent.organizers],
-        visibility: newEvent.visibility,
-        inviteLink: `https://eventify.com/invite/${Date.now()}`,
-        invitedUsers: [],
-        pendingInvites: [],
-        image: imageUrl,
-        createdAt: new Date().toISOString(),
-      };
-      const docRef = await addDoc(collection(db, 'events'), eventData);
-      await createGroupChat(docRef.id, newEvent.title, [currentUser.uid, ...newEvent.organizers], eventData.invitedUsers);
-      setNewEvent({
-        title: '',
-        location: '',
-        date: '',
-        visibility: 'public',
-        organizers: [],
-        inviteLink: '',
-        image: null,
-        description: '',
-        croppedImage: null,
-      });
-      setStep(1);
-      setShowCreateEventModal(false);
-      fetchEvents();
-    } catch (err: any) {
-      console.error('Detailed error in handleCreateEvent:', err);
-      setError(`Failed to create event: ${err.message}`);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const onCropComplete = (_croppedArea: any, croppedAreaPixels: any) => {
-    setCroppedAreaPixels(croppedAreaPixels);
-  };
-
-  const getCroppedImg = async () => {
-    if (!croppedAreaPixels) {
-      throw new Error('Cropped area is not defined');
-    }
-    const canvas = document.createElement('canvas');
-    const image = new Image();
-    image.src = URL.createObjectURL(newEvent.image!);
-    await new Promise((resolve) => (image.onload = resolve));
-    canvas.width = croppedAreaPixels.width;
-    canvas.height = croppedAreaPixels.height;
-    const ctx = canvas.getContext('2d');
-    ctx?.drawImage(
-      image,
-      croppedAreaPixels.x,
-      croppedAreaPixels.y,
-      croppedAreaPixels.width,
-      croppedAreaPixels.height,
-      0,
-      0,
-      croppedAreaPixels.width,
-      croppedAreaPixels.height
     );
-    return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), 'image/jpeg'));
-  };
 
-  const handleCropImage = async () => {
-    try {
-      const croppedBlob = await getCroppedImg();
-      const croppedFile = new File([croppedBlob as Blob], 'cropped.jpg', { type: 'image/jpeg' });
-      const storageRef = ref(storage, `events/cropped-${Date.now()}.jpg`);
-      await uploadBytes(storageRef, croppedFile);
-      const url = await getDownloadURL(storageRef);
-      setNewEvent((prev) => ({ ...prev, croppedImage: url }));
-      handleNextStep();
-    } catch (err: any) {
-      setError('Failed to crop image: ' + err.message);
+    return () => unsubscribeEvents();
+  }, [currentUser, navigate, accessibleEvents]);
+
+  // Handle service selection and add the service to the event
+  const handleServiceSelection = useCallback(
+    async (eventId: string, serviceType: 'refreshments' | 'venue' | 'catering') => {
+      navigate(`/business-page?eventId=${eventId}&service=${serviceType}`);
+      setMenuOpen(null);
+
+      // Mock service selection (in a real app, this would happen after selecting a business)
+      const mockService: ServiceData = {
+        type: serviceType,
+        businessId: 'mock-business-id',
+        businessName: 'Mock Business',
+      };
+      await addServiceToEvent(eventId, mockService);
+    },
+    [navigate]
+  );
+
+  // Add a service to an event (updates Firestore)
+  const addServiceToEvent = useCallback(
+    async (eventId: string, service: ServiceData) => {
+      try {
+        const eventRef = doc(db, 'events', eventId);
+        await updateDoc(eventRef, { service });
+        toast.success(`Service "${service.type}" added from ${service.businessName}`);
+      } catch (err) {
+        toast.error('Failed to add service to event.');
+        console.error(err);
+      }
+    },
+    []
+  );
+
+  // Close menu when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(null);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Focus management for the modal
+  useEffect(() => {
+    if (showModal && modalRef.current) {
+      const focusableElements = modalRef.current.querySelectorAll(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+      );
+      const firstElement = focusableElements[0] as HTMLElement;
+      const lastElement = focusableElements[focusableElements.length - 1] as HTMLElement;
+
+      const handleKeyDown = (e: KeyboardEvent) => {
+        if (e.key === 'Tab') {
+          if (e.shiftKey && document.activeElement === firstElement) {
+            e.preventDefault();
+            lastElement.focus();
+          } else if (!e.shiftKey && document.activeElement === lastElement) {
+            e.preventDefault();
+            firstElement.focus();
+          }
+        }
+        if (e.key === 'Escape') {
+          setShowModal(false);
+        }
+      };
+
+      firstElement?.focus();
+      document.addEventListener('keydown', handleKeyDown);
+
+      return () => {
+        document.removeEventListener('keydown', handleKeyDown);
+      };
     }
-  };
+  }, [showModal]);
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-neutral-darkGray flex items-center justify-center">
+        <div className="flex items-center space-x-3">
+          <svg
+            className="animate-spin h-8 w-8 text-accent-gold"
+            xmlns="http://www.w3.org/2000/svg"
+            fill="none"
+            viewBox="0 0 24 24"
+          >
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path
+              className="opacity-75"
+              fill="currentColor"
+              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+            />
+          </svg>
+          <span className="text-neutral-lightGray text-base sm:text-lg font-medium">Loading Events...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="min-h-screen bg-neutral-darkGray flex items-center justify-center flex-col">
+        <p className="text-red-500 text-sm sm:text-lg">{error}</p>
+        {currentUser && (
+          <button
+            onClick={() => window.location.reload()}
+            className="mt-4 bg-accent-gold text-neutral-darkGray font-semibold rounded-full px-5 py-2 sm:px-6 sm:py-3 hover:bg-yellow-300 transition-all shadow-lg text-sm sm:text-base"
+          >
+            Retry
+          </button>
+        )}
+        {!currentUser && (
+          <Link
+            to="/login"
+            className="mt-4 bg-accent-gold text-neutral-darkGray font-semibold rounded-full px-5 py-2 sm:px-6 sm:py-3 hover:bg-yellow-300 transition-all shadow-lg text-sm sm:text-base"
+          >
+            Sign In
+          </Link>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-neutral-darkGray text-neutral-lightGray">
-      <section className="bg-primary-navy p-6">
-        <div className="container mx-auto flex justify-between items-center">
-          <motion.div initial="hidden" animate="visible" variants={headingFade}>
-            <h1 className="text-4xl font-bold">Upcoming Events</h1>
-            <p className="text-lg mt-2">Discover and join exciting events.</p>
-          </motion.div>
-          {currentUser && (
-            <div className="relative flex items-center group">
-              <button
-                onClick={() => setShowCreateEventModal(true)}
-                className="text-accent-gold hover:text-secondary-deepRed transition-colors"
-                aria-label="Create Event"
-              >
-                <FaPlus size={24} />
-              </button>
-              <AnimatePresence>
-                <motion.span
-                  variants={textVariants}
-                  initial="hidden"
-                  animate="visible"
-                  exit="exit"
-                  className="ml-2 text-accent-gold text-lg overflow-hidden whitespace-nowrap"
-                >
-                  Create Event
-                </motion.span>
-              </AnimatePresence>
-            </div>
-          )}
-        </div>
-      </section>
-
-      <section className="container mx-auto p-6">
-        <motion.div className="relative mb-8 max-w-md mx-auto" initial="hidden" animate="visible" variants={fadeIn}>
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={handleSearch}
-            placeholder="Search events by title..."
-            className="w-full p-3 pr-10 rounded bg-primary-navy text-neutral-lightGray border border-accent-gold focus:outline-none focus:ring-2 focus:ring-accent-gold"
-          />
-          <input
-            type="date"
-            value={searchDate}
-            onChange={handleDateSearch}
-            placeholder="Search by date (MM-DD)..."
-            className="w-full p-3 mt-2 rounded bg-primary-navy text-neutral-lightGray border border-accent-gold focus:outline-none focus:ring-2 focus:ring-accent-gold"
-          />
-          {searchQuery || searchDate ? (
-            <button
-              onClick={clearSearch}
-              className="absolute right-3 top-1/2 transform -translate-y-1/2 text-accent-gold hover:text-secondary-deepRed"
-              aria-label="Clear search"
+      <motion.section
+        className="py-8 px-4 sm:py-12 sm:px-6 relative z-10"
+        initial="hidden"
+        animate="visible"
+        variants={fadeIn}
+      >
+        <motion.div
+          className="max-w-6xl mx-auto bg-neutral-mediumGray/50 backdrop-blur-lg rounded-2xl p-4 sm:p-8 shadow-xl border border-neutral-mediumGray/50"
+          variants={fadeIn}
+        >
+          <div className="flex flex-col sm:flex-row items-center justify-between mb-4 sm:mb-6 gap-3 sm:gap-4">
+            <motion.h2
+              className="text-xl sm:text-3xl font-bold text-accent-gold"
+              initial="hidden"
+              animate="visible"
+              variants={headingFade}
             >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          ) : null}
-        </motion.div>
-
-        <motion.p className="text-center text-neutral-lightGray mb-6" initial="hidden" animate="visible" variants={fadeIn}>
-          {filteredEvents.length} {filteredEvents.length === 1 ? 'event' : 'events'} found
-        </motion.p>
-
-        {loading && (
-          <div className="text-center">
-            <svg className="animate-spin h-8 w-8 text-accent-gold mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-            </svg>
-            <p>Loading events...</p>
+              All Events
+              <span className="bg-red-500 text-white px-2 sm:px-3 py-1 rounded-full text-xs sm:text-sm ml-2 sm:ml-3">
+                {events.length} Live
+              </span>
+            </motion.h2>
+            {currentUser && (
+              <motion.button
+                onClick={() => {
+                  setShowModal(true);
+                  if (newEvent.title) searchImages(newEvent.title);
+                }}
+                className="bg-accent-gold text-neutral-darkGray font-semibold rounded-full px-5 py-2 sm:px-6 sm:py-3 hover:bg-yellow-300 transition-all shadow-lg min-w-[150px] sm:min-w-[180px] text-sm sm:text-base"
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                disabled={multiStepLoading}
+              >
+                {multiStepLoading ? 'Creating...' : 'Create Event'}
+              </motion.button>
+            )}
           </div>
-        )}
-        {error && <p className="text-red-500 text-center">{error}</p>}
-        {!loading && !error && (
-          <motion.div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" initial="hidden" animate="visible" variants={stagger}>
-            {filteredEvents.length > 0 ? (
-              filteredEvents.map((event) => (
-                <motion.div key={event.id} className="bg-neutral-offWhite text-neutral-darkGray rounded shadow" variants={fadeIn}>
-                  <div className="relative w-full h-64">
-                    <img src={event.image || 'https://picsum.photos/300/200'} alt={event.title} className="w-full h-full object-cover rounded-t" />
-                    <span className="absolute top-2 right-2 bg-black bg-opacity-75 text-white px-2 py-1 rounded">
-                      {event.visibility === 'public' ? 'Public' : 'Private'}
-                    </span>
+          {events.length > 0 ? (
+            <motion.div
+              className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6"
+              initial="hidden"
+              animate="visible"
+              variants={stagger}
+            >
+              {events.map((event) => (
+                <motion.div
+                  key={event.id}
+                  className="bg-neutral-darkGray rounded-lg overflow-hidden shadow-md relative"
+                  variants={fadeIn}
+                >
+                  {/* Event Type Tag */}
+                  <div
+                    className={`absolute top-2 left-2 px-2 py-1 rounded-full text-xs font-medium ${
+                      event.visibility === 'public'
+                        ? 'bg-green-500/80 text-white'
+                        : 'bg-red-500/80 text-white'
+                    }`}
+                  >
+                    {event.visibility === 'public' ? 'Public' : 'Private'}
                   </div>
+
+                  {/* Three-Dot Menu */}
+                  <div className="absolute top-2 right-2">
+                    <motion.button
+                      onClick={() => setMenuOpen(menuOpen === event.id ? null : event.id)}
+                      className="text-neutral-lightGray hover:text-accent-gold transition-colors p-1"
+                      whileHover={{ scale: 1.2 }}
+                      whileTap={{ scale: 0.9 }}
+                      aria-label="More options"
+                    >
+                      <FaEllipsisH size={16} />
+                    </motion.button>
+                    <AnimatePresence>
+                      {menuOpen === event.id && (
+                        <motion.div
+                          ref={menuRef}
+                          className="absolute right-0 mt-2 w-48 bg-neutral-mediumGray/90 backdrop-blur-lg rounded-lg shadow-lg border border-neutral-mediumGray/50 z-10"
+                          initial={{ opacity: 0, scale: 0.95 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.95 }}
+                        >
+                          <button
+                            onClick={() => handleServiceSelection(event.id, 'refreshments')}
+                            className="block w-full text-left px-4 py-2 text-sm text-neutral-lightGray hover:bg-secondary-deepRed/50 rounded-t-lg"
+                          >
+                            Add Refreshments
+                          </button>
+                          <button
+                            onClick={() => handleServiceSelection(event.id, 'venue')}
+                            className="block w-full text-left px-4 py-2 text-sm text-neutral-lightGray hover:bg-secondary-deepRed/50"
+                          >
+                            Book a Venue
+                          </button>
+                          <button
+                            onClick={() => handleServiceSelection(event.id, 'catering')}
+                            className="block w-full text-left px-4 py-2 text-sm text-neutral-lightGray hover:bg-secondary-deepRed/50 rounded-b-lg"
+                          >
+                            Add Food and Catering
+                          </button>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+
+                  <img
+                    src={event.image || defaultEventImage}
+                    alt={event.title}
+                    className="w-full h-40 object-cover"
+                    loading="lazy"
+                  />
                   <div className="p-4">
-                    <h3 className="text-xl font-semibold">{event.title}</h3>
-                    <p className="text-sm text-accent-gold">{event.date || event.createdAt}</p>
-                    <p className="mt-2">{event.location || 'No location'}</p>
+                    <h3 className="text-lg font-semibold text-accent-gold">{event.title}</h3>
+                    <p className="text-sm text-neutral-lightGray mt-1">
+                      {new Date(event.date || event.createdAt).toLocaleDateString()}
+                    </p>
+                    <p className="text-sm text-neutral-lightGray mt-1">{event.location || 'Location TBD'}</p>
+
+                    {/* Service Provided Tag */}
+                    {event.service && (
+                      <Link
+                        to={`/business-profile/${event.service.businessId}`}
+                        className="inline-block mt-2 px-3 py-1 bg-blue-500/80 text-white rounded-full text-xs font-medium hover:bg-blue-600 transition-colors"
+                      >
+                        Service Provided by {event.service.businessName}
+                      </Link>
+                    )}
+
+                    <div className="mt-3 flex space-x-2">
+                      <Link
+                        to={`/events/${event.id}`}
+                        className="px-4 py-2 bg-accent-gold text-neutral-darkGray rounded-full hover:bg-yellow-300 transition-all text-sm font-medium"
+                      >
+                        View Details
+                      </Link>
+                      {currentUser && accessibleEvents.includes(event.id) && (
+                        <Link
+                          to={`/chat/${event.id}`}
+                          className="px-4 py-2 bg-blue-600 text-white rounded-full hover:bg-blue-500 transition-all text-sm font-medium flex items-center space-x-1"
+                          onClick={() => console.log('Navigating to chat for event:', event.id)}
+                        >
+                          <FaComments size={14} />
+                          <span>Join Chat</span>
+                        </Link>
+                      )}
+                    </div>
                   </div>
-                  {currentUser && event.visibility === 'public' && !event.invitedUsers.includes(currentUser.uid) && !event.organizers.includes(currentUser.uid) ? (
-                    <button
-                      className="w-full bg-secondary-deepRed text-neutral-lightGray px-4 py-2 rounded hover:bg-secondary-darkRed"
-                      onClick={() => requestInvite(event.id)}
-                    >
-                      Request Invite
-                    </button>
-                  ) : currentUser && (event.invitedUsers.includes(currentUser.uid) || event.organizers.includes(currentUser.uid)) && event.visibility === 'private' ? (
-                    <button
-                      className="w-full bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700"
-                      onClick={() => navigate(`/chat/${event.id}`)}
-                    >
-                      Go to Event Chat
-                    </button>
-                  ) : null}
                 </motion.div>
-              ))
-            ) : (
-              <motion.p className="text-center col-span-full" variants={fadeIn}>
-                No events found.
+              ))}
+            </motion.div>
+          ) : (
+            <p className="text-center text-neutral-lightGray text-sm sm:text-base">
+              No events found. Be the first to create one!
+            </p>
+          )}
+        </motion.div>
+      </motion.section>
+
+      {/* Multi-Step Modal */}
+      {showModal && currentUser && (
+        <div
+          className="fixed inset-0 bg-black bg-opacity-70 backdrop-blur-sm flex items-center justify-center z-50 p-4 overflow-y-auto"
+          onClick={() => setShowModal(false)}
+        >
+          <motion.div
+            ref={modalRef}
+            onClick={(e) => e.stopPropagation()}
+            className="bg-neutral-mediumGray/90 backdrop-blur-lg rounded-2xl max-w-md w-full mx-2 p-4 sm:p-6 relative shadow-2xl border border-neutral-mediumGray/50"
+            role="dialog"
+            aria-labelledby="multi-step-create-event-title"
+            initial={{ opacity: 0, scale: 0.95, y: 30 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.95, y: 30 }}
+            transition={{ type: 'spring', stiffness: 300, damping: 25 }}
+          >
+            <motion.button
+              type="button"
+              onClick={() => setShowModal(false)}
+              className="absolute top-3 right-3 sm:top-4 sm:right-4 text-neutral-lightGray hover:text-accent-gold transition-colors z-10"
+              whileHover={{ scale: 1.2, rotate: 90 }}
+              whileTap={{ scale: 0.9 }}
+              aria-label="Close modal"
+            >
+              <FaTimes size={20} />
+            </motion.button>
+
+            <motion.h3
+              id="multi-step-create-event-title"
+              className="text-xl sm:text-2xl font-bold text-accent-gold mb-4 sm:mb-6 text-center"
+              initial={{ opacity: 0, y: -20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.2 }}
+            >
+              {step === 1 && 'Step 1: Event Details'}
+              {step === 2 && 'Step 2: Collaborators'}
+              {step === 3 && 'Step 3: Image & Description'}
+              {step === 4 && 'Step 4: Preview & Create'}
+            </motion.h3>
+
+            <div className="flex justify-between mb-4 sm:mb-6 relative">
+              {[1, 2, 3, 4].map((stepNum) => (
+                <div key={stepNum} className="flex flex-col items-center relative z-10">
+                  <motion.div
+                    className={`w-8 h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center text-xs sm:text-sm font-semibold transition-all duration-300 ${
+                      stepNum <= step ? 'bg-accent-gold text-neutral-darkGray' : 'bg-neutral-mediumGray text-neutral-lightGray'
+                    }`}
+                    initial={{ scale: 0 }}
+                    animate={{ scale: 1 }}
+                    transition={{ delay: stepNum * 0.1 }}
+                  >
+                    {stepNum < step ? <FaCheck size={14} /> : stepNum}
+                  </motion.div>
+                  {stepNum < 4 && (
+                    <div
+                      className={`absolute top-4 sm:top-5 left-1/2 w-[calc(100%+16px)] sm:w-[calc(100%+20px)] h-1 transform translate-x-4 sm:translate-x-5 ${
+                        stepNum < step ? 'bg-accent-gold' : 'bg-neutral-mediumGray'
+                      }`}
+                    />
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {error && (
+              <motion.p
+                className="text-red-500 text-xs sm:text-sm p-2 sm:p-3 bg-red-500/20 rounded-lg mb-3 sm:mb-4 text-center"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+              >
+                {error}
               </motion.p>
             )}
-          </motion.div>
-        )}
-      </section>
 
-      {showCreateEventModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4">
-          <div className="bg-neutral-offWhite text-neutral-darkGray p-6 rounded-3xl shadow-lg max-w-md w-full">
-            {/* Progress Bar */}
-            <div className="mb-6">
-              <div className="relative flex items-center justify-between">
-                {[1, 2, 3, 4].map((stepNum, index) => (
-                  <div key={stepNum} className="flex flex-col items-center relative">
-                    {/* Step Circle */}
-                    <div
-                      className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold transition-all duration-300 ${
-                        stepNum <= step
-                          ? 'bg-secondary-deepRed text-white'
-                          : 'bg-gray-300 text-gray-500'
-                      }`}
-                    >
-                      {stepNum < step ? <FaCheck size={14} /> : stepNum}
-                    </div>
-                    {/* Step Label (Number Only) */}
-                    <span className="text-xs mt-1 text-neutral-darkGray">{stepNum}</span>
-                    {/* Progress Line Between Steps */}
-                    {index < 3 && (
-                      <div
-                        className={`absolute top-4 left-1/2 w-[calc(100%+16px)] h-1 transform translate-x-4 ${
-                          stepNum < step ? 'bg-secondary-deepRed' : 'bg-gray-300'
-                        }`}
-                      />
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="flex justify-between mb-4">
-              <h2 className="text-2xl font-bold">
-                {step === 1 && ': Event Details'}
-                {step === 2 && ': Collaborators'}
-                {step === 3 && ': Image & Description'}
-                {step === 4 && ': Confirmation'}
-              </h2>
-            </div>
-            {error && <p className="text-red-500 mb-4">{error}</p>}
-            {step === 1 && (
-              <form className="space-y-4">
-                <label htmlFor="title" className="block text-neutral-darkGray">Event Title:</label>
-                <input
-                  id="title"
-                  value={newEvent.title}
-                  onChange={(e) => setNewEvent({ ...newEvent, title: e.target.value })}
-                  className="w-full p-3 rounded-xl bg-white text-neutral-darkGray border border-gray-300 focus:outline-none focus:ring-2 focus:ring-accent-gold"
-                  required
-                />
-                <label htmlFor="location" className="block text-neutral-darkGray">Location:</label>
-                <input
-                  id="location"
-                  value={newEvent.location}
-                  onChange={(e) => setNewEvent({ ...newEvent, location: e.target.value })}
-                  className="w-full p-3 rounded-xl bg-white text-neutral-darkGray border border-gray-300 focus:outline-none focus:ring-2 focus:ring-accent-gold"
-                  required
-                />
-                <label htmlFor="date" className="block text-neutral-darkGray">Date:</label>
-                <input
-                  id="date"
-                  type="date"
-                  value={newEvent.date}
-                  onChange={(e) => setNewEvent({ ...newEvent, date: e.target.value })}
-                  className="w-full p-3 rounded-xl bg-white text-neutral-darkGray border border-gray-300 focus:outline-none focus:ring-2 focus:ring-accent-gold"
-                  required
-                />
-                <label htmlFor="visibility" className="block text-neutral-darkGray">Visibility:</label>
-                <select
-                  id="visibility"
-                  value={newEvent.visibility}
-                  onChange={(e) => setNewEvent({ ...newEvent, visibility: e.target.value as 'public' | 'private' })}
-                  className="w-full p-3 rounded-xl bg-white text-neutral-darkGray border border-gray-300 focus:outline-none focus:ring-2 focus:ring-accent-gold"
+            <div className="space-y-4 sm:space-y-6">
+              {step === 1 && (
+                <motion.form
+                  className="space-y-3 sm:space-y-4"
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: 0.3 }}
                 >
-                  <option value="public">Public</option>
-                  <option value="private">Private</option>
-                </select>
-                <button type="button" onClick={handleNextStep} className="w-full bg-accent-gold text-white p-3 rounded-xl hover:bg-opacity-90 transition-all">
-                  Next
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowCreateEventModal(false)}
-                  className="w-full bg-gray-500 text-white p-3 rounded-xl hover:bg-opacity-90 transition-all mt-2"
-                >
-                  Cancel
-                </button>
-              </form>
-            )}
-            {step === 2 && (
-              <div className="space-y-4">
-                <p className="text-neutral-darkGray">Would you like to invite collaborators?</p>
-                <button
-                  onClick={() => {
-                    setNewEvent({ ...newEvent, organizers: newEvent.organizers });
-                    handleNextStep();
-                  }}
-                  className="w-full bg-gray-500 text-white p-3 rounded-xl hover:bg-opacity-90 transition-all"
-                >
-                  No
-                </button>
-                <button
-                  onClick={handleNextStep}
-                  className="w-full bg-accent-gold text-white p-3 rounded-xl hover:bg-opacity-90 transition-all"
-                >
-                  Yes
-                </button>
-                {followers.length > 0 && (
                   <div>
-                    <h3 className="text-neutral-darkGray">Followers:</h3>
-                    {followers.map((follower) => (
-                      <div key={follower.displayName} className="flex items-center justify-between py-2">
-                        <span>{follower.displayName}</span>
-                        <FaPlus
-                          className="cursor-pointer text-accent-gold"
-                          onClick={() => setNewEvent((prev) => ({ ...prev, organizers: [...prev.organizers, follower.displayName] }))}
-                        />
-                      </div>
-                    ))}
-                  </div>
-                )}
-                <button
-                  onClick={() => {/* Implement share link logic */}}
-                  className="w-full bg-accent-gold text-white p-3 rounded-xl hover:bg-opacity-90 transition-all mt-4"
-                >
-                  Create Share Link
-                </button>
-                <button type="button" onClick={handlePrevStep} className="w-full bg-gray-500 text-white p-3 rounded-xl hover:bg-opacity-90 transition-all mt-4">
-                  Back
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowCreateEventModal(false)}
-                  className="w-full bg-gray-500 text-white p-3 rounded-xl hover:bg-opacity-90 transition-all mt-2"
-                >
-                  Cancel
-                </button>
-              </div>
-            )}
-            {step === 3 && (
-              <div className="space-y-4">
-                <p className="text-neutral-darkGray">Upload and crop an image (optional):</p>
-                <label htmlFor="image-upload" className="block text-neutral-darkGray mb-1">
-                  Choose an image:
-                </label>
-                <input
-                  id="image-upload"
-                  type="file"
-                  accept="image/*"
-                  onChange={(e) => setNewEvent({ ...newEvent, image: e.target.files?.[0] || null })}
-                  className="w-full p-3 rounded-xl border border-gray-300"
-                />
-                {newEvent.image && (
-                  <div className="relative w-full h-64 rounded-xl overflow-hidden">
-                    <Cropper
-                      image={URL.createObjectURL(newEvent.image)}
-                      crop={crop}
-                      zoom={zoom}
-                      aspect={4 / 3}
-                      onCropChange={setCrop}
-                      onZoomChange={setZoom}
-                      onCropComplete={onCropComplete}
+                    <label htmlFor="title" className="block text-xs sm:text-sm text-neutral-lightGray mb-1">
+                      Event Title
+                    </label>
+                    <input
+                      id="title"
+                      value={newEvent.title}
+                      onChange={(e) => setNewEvent({ ...newEvent, title: e.target.value })}
+                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-neutral-lightGray border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
+                      placeholder="Enter event title"
+                      required
                     />
                   </div>
-                )}
-                <button
-                  onClick={handleCropImage}
-                  className="w-full bg-accent-gold text-white p-3 rounded-xl hover:bg-opacity-90 transition-all"
-                  disabled={!newEvent.image}
+                  <div>
+                    <label htmlFor="location" className="block text-xs sm:text-sm text-neutral-lightGray mb-1">
+                      Location
+                    </label>
+                    <input
+                      id="location"
+                      value={newEvent.location}
+                      onChange={(e) => setNewEvent({ ...newEvent, location: e.target.value })}
+                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-neutral-lightGray border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
+                      placeholder="Enter location"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="date" className="block text-xs sm:text-sm text-neutral-lightGray mb-1">
+                      Date
+                    </label>
+                    <input
+                      id="date"
+                      type="date"
+                      value={newEvent.date}
+                      onChange={(e) => setNewEvent({ ...newEvent, date: e.target.value })}
+                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-neutral-lightGray border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
+                      required
+                      min={new Date().toISOString().split('T')[0]}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="visibility" className="block text-xs sm:text-sm text-neutral-lightGray mb-1">
+                      Visibility
+                    </label>
+                    <select
+                      id="visibility"
+                      value={newEvent.visibility}
+                      onChange={(e) => setNewEvent({ ...newEvent, visibility: e.target.value as 'public' | 'private' })}
+                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-neutral-lightGray border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
+                    >
+                      <option value="public">Public</option>
+                      <option value="private">Private</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label htmlFor="category" className="block text-xs sm:text-sm text-neutral-lightGray mb-1">
+                      Category
+                    </label>
+                    <select
+                      id="category"
+                      value={newEvent.category}
+                      onChange={(e) =>
+                        setNewEvent({
+                          ...newEvent,
+                          category: e.target.value as EventCategory,
+                        })
+                      }
+                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-neutral-lightGray border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
+                    >
+                      <option value="General">General</option>
+                      <option value="Music">Music</option>
+                      <option value="Food">Food</option>
+                      <option value="Tech">Tech</option>
+                      <option value="Refreshments">Refreshments</option>
+                      <option value="Catering/Food">Catering/Food</option>
+                      <option value="Venue Provider">Venue Provider</option>
+                    </select>
+                  </div>
+                  <motion.button
+                    type="button"
+                    onClick={() => {
+                      if (newEvent.title) searchImages(newEvent.title);
+                      handleNextStep();
+                    }}
+                    className="w-full bg-accent-gold text-neutral-darkGray p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    disabled={multiStepLoading || !newEvent.title || !newEvent.location || !newEvent.date}
+                  >
+                    Next
+                  </motion.button>
+                  <motion.button
+                    type="button"
+                    onClick={() => setShowModal(false)}
+                    className="w-full bg-neutral-mediumGray text-neutral-lightGray p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all text-sm sm:text-base"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                  >
+                    Cancel
+                  </motion.button>
+                </motion.form>
+              )}
+              {step === 2 && (
+                <motion.div
+                  className="space-y-3 sm:space-y-4"
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: 0.3 }}
                 >
-                  Crop and Next
-                </button>
-                <label htmlFor="description" className="block text-neutral-darkGray">Description (optional):</label>
-                <textarea
-                  id="description"
-                  value={newEvent.description}
-                  onChange={(e) => setNewEvent({ ...newEvent, description: e.target.value })}
-                  className="w-full p-3 rounded-xl bg-white text-neutral-darkGray border border-gray-300 focus:outline-none focus:ring-2 focus:ring-accent-gold"
-                  rows={3}
-                />
-                <button type="button" onClick={() => { handleNextStep(); }} className="w-full bg-gray-500 text-white p-3 rounded-xl hover:bg-opacity-90 transition-all mt-2">
-                  Skip for Now
-                </button>
-                <button type="button" onClick={handlePrevStep} className="w-full bg-gray-500 text-white p-3 rounded-xl hover:bg-opacity-90 transition-all mt-2">
-                  Back
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowCreateEventModal(false)}
-                  className="w-full bg-gray-500 text-white p-3 rounded-xl hover:bg-opacity-90 transition-all mt-2"
+                  <p className="text-neutral-lightGray text-center text-sm sm:text-base">Would you like to invite collaborators?</p>
+                  <motion.button
+                    onClick={() => handleNextStep()}
+                    className="w-full bg-neutral-mediumGray text-neutral-lightGray p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all shadow-md text-sm sm:text-base"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                  >
+                    No
+                  </motion.button>
+                  {followers.length > 0 && (
+                    <motion.button
+                      onClick={handleNextStep}
+                      className="w-full bg-accent-gold text-neutral-darkGray p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base"
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                    >
+                      Yes
+                    </motion.button>
+                  )}
+                  <div>
+                    <h3 className="text-xs sm:text-sm text-neutral-lightGray mb-2">Your Followers:</h3>
+                    {followers.length > 0 ? (
+                      <div className="max-h-32 sm:max-h-40 overflow-y-auto scrollbar-thin scrollbar-thumb-neutral-mediumGray scrollbar-track-neutral-darkGray">
+                        {followers.map((followerId: string) => (
+                          <motion.div
+                            key={followerId}
+                            className="flex items-center justify-between py-1 sm:py-2 px-2 sm:px-3 bg-neutral-mediumGray rounded-lg mb-2"
+                            initial={{ opacity: 0, y: 10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ delay: 0.1 }}
+                          >
+                            <span className="text-xs sm:text-sm text-neutral-lightGray">{followerNames[followerId] || followerId}</span>
+                            <motion.button
+                              onClick={() =>
+                                setNewEvent((prev: MultiStepEventData) => {
+                                  if (!prev.organizers.includes(followerId)) {
+                                    return { ...prev, organizers: [...prev.organizers, followerId] };
+                                  }
+                                  return prev;
+                                })
+                              }
+                              className="text-accent-gold hover:text-yellow-300 transition-colors"
+                              whileHover={{ scale: 1.2 }}
+                              whileTap={{ scale: 0.9 }}
+                              aria-label={`Add ${followerNames[followerId] || followerId} as organizer`}
+                            >
+                              <FaPlus size={14} />
+                            </motion.button>
+                          </motion.div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-xs sm:text-sm text-neutral-lightGray text-center">You have no followers yet.</p>
+                    )}
+                  </div>
+                  <p className="text-xs sm:text-sm text-neutral-lightGray text-center">
+                    Selected Organizers: {newEvent.organizers.map((org: string) => followerNames[org] || org).join(', ') || 'None'}
+                  </p>
+                  <motion.button
+                    onClick={() => {
+                      const link = createShareLink();
+                      toast.success(`Invite link created: ${link}`);
+                    }}
+                    className="w-full bg-accent-gold text-neutral-darkGray p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                  >
+                    Create Share Link
+                  </motion.button>
+                  <motion.button
+                    type="button"
+                    onClick={handlePrevStep}
+                    className="w-full bg-neutral-mediumGray text-neutral-lightGray p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all shadow-md text-sm sm:text-base"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                  >
+                    Back
+                  </motion.button>
+                  <motion.button
+                    type="button"
+                    onClick={() => setShowModal(false)}
+                    className="w-full bg-neutral-mediumGray text-neutral-lightGray p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all text-sm sm:text-base"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                  >
+                    Cancel
+                  </motion.button>
+                </motion.div>
+              )}
+              {step === 3 && (
+                <motion.div
+                  className="space-y-3 sm:space-y-4"
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: 0.3 }}
                 >
-                  Cancel
-                </button>
-              </div>
-            )}
-            {step === 4 && (
-              <div className="space-y-4">
-                <div className="relative w-full h-64 bg-neutral-offWhite rounded-xl overflow-hidden">
-                  <img
-                    src={newEvent.croppedImage || userPhotoURL || 'https://picsum.photos/300/200'}
-                    alt="Event Preview"
-                    className="w-full h-full object-cover"
-                  />
-                  <span className="absolute top-2 right-2 bg-black bg-opacity-75 text-white px-2 py-1 rounded-xl">
-                    {newEvent.visibility === 'public' ? 'Public' : 'Private'}
-                  </span>
-                </div>
-                <h3 className="text-xl font-semibold">{newEvent.title}</h3>
-                <p className="text-sm text-accent-gold">{newEvent.date}</p>
-                <p>{newEvent.location}</p>
-                <p>{newEvent.description || 'No description'}</p>
-                <button onClick={handleCreateEvent} className="w-full bg-accent-gold text-white p-3 rounded-xl hover:bg-opacity-90 transition-all" disabled={loading}>
-                  {loading ? 'Creating...' : 'Create Event'}
-                </button>
-                <button type="button" onClick={handlePrevStep} className="w-full bg-gray-500 text-white p-3 rounded-xl hover:bg-opacity-90 transition-all mt-2">
-                  Back
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowCreateEventModal(false)}
-                  className="w-full bg-gray-500 text-white p-3 rounded-xl hover:bg-opacity-90 transition-all mt-2"
+                  <p className="text-neutral-lightGray text-center text-sm sm:text-base">Select an image for your event:</p>
+                  {searchedImages.length > 0 ? (
+                    <div className="grid grid-cols-3 gap-2 sm:gap-3 max-h-40 sm:max-h-48 overflow-y-auto scrollbar-thin scrollbar-thumb-neutral-mediumGray scrollbar-track-neutral-darkGray">
+                      {searchedImages.map((url: string, index: number) => (
+                        <motion.img
+                          key={index}
+                          src={url}
+                          alt={`Event photo option ${index + 1}`}
+                          className={`w-full h-20 sm:h-24 object-cover rounded-lg cursor-pointer hover:opacity-90 transition-all ${
+                            selectedImageIndex === index ? 'border-4 border-accent-gold' : 'border-2 border-transparent'
+                          }`}
+                          onClick={() => {
+                            setSelectedImageIndex(index);
+                            setNewEvent({ ...newEvent, selectedImage: url });
+                          }}
+                          initial={{ opacity: 0, scale: 0.8 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          transition={{ delay: index * 0.1 }}
+                          whileTap={{ scale: 0.95 }}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs sm:text-sm text-neutral-lightGray text-center">No images found. Please proceed.</p>
+                  )}
+                  <div>
+                    <label htmlFor="description" className="block text-xs sm:text-sm text-neutral-lightGray mb-1 sm:mb-2">
+                      Description (optional)
+                    </label>
+                    <textarea
+                      id="description"
+                      value={newEvent.description}
+                      onChange={(e) => setNewEvent({ ...newEvent, description: e.target.value })}
+                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-neutral-lightGray border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
+                      rows={3}
+                      placeholder="Describe your event..."
+                    />
+                  </div>
+                  <motion.button
+                    type="button"
+                    onClick={handleNextStep}
+                    className="w-full bg-accent-gold text-neutral-darkGray p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    disabled={multiStepLoading || !newEvent.selectedImage}
+                  >
+                    Next
+                  </motion.button>
+                  <motion.button
+                    type="button"
+                    onClick={handlePrevStep}
+                    className="w-full bg-neutral-mediumGray text-neutral-lightGray p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all shadow-md text-sm sm:text-base"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                  >
+                    Back
+                  </motion.button>
+                  <motion.button
+                    type="button"
+                    onClick={() => setShowModal(false)}
+                    className="w-full bg-neutral-mediumGray text-neutral-lightGray p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all text-sm sm:text-base"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                  >
+                    Cancel
+                  </motion.button>
+                </motion.div>
+              )}
+              {step === 4 && (
+                <motion.div
+                  className="space-y-3 sm:space-y-4"
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: 0.3 }}
                 >
-                  Cancel
-                </button>
-              </div>
-            )}
-          </div>
+                  <p className="text-neutral-lightGray text-center mb-3 sm:mb-4 text-sm sm:text-base">Preview your event:</p>
+                  <motion.div
+                    className="relative w-full h-72 sm:h-80 bg-neutral-mediumGray/50 rounded-xl overflow-hidden shadow-lg transition-all duration-300"
+                    whileTap={{ scale: 0.98 }}
+                  >
+                    <img
+                      src={newEvent.selectedImage || userPhotoURL || defaultEventImage}
+                      alt={newEvent.title}
+                      className="w-full h-full object-cover"
+                      onError={(e) => (e.currentTarget.src = defaultEventImage)}
+                    />
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/70 to-transparent flex flex-col justify-end p-3 sm:p-4 text-white">
+                      <h3 className="text-base sm:text-xl font-semibold line-clamp-1">{newEvent.title}</h3>
+                      <p className="text-xs sm:text-sm mt-1 line-clamp-1">{new Date(newEvent.date).toLocaleDateString()}</p>
+                      <p className="text-xs sm:text-sm line-clamp-1">{newEvent.location || 'Location TBD'}</p>
+                      <p className="text-xs sm:text-sm line-clamp-2 mt-1">{newEvent.description || 'No description'}</p>
+                    </div>
+                  </motion.div>
+                  <motion.button
+                    onClick={multiStepHandleCreateEvent}
+                    className="w-full bg-accent-gold text-neutral-darkGray p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    disabled={multiStepLoading}
+                  >
+                    {multiStepLoading ? 'Creating...' : 'Create Event'}
+                  </motion.button>
+                  <motion.button
+                    type="button"
+                    onClick={handlePrevStep}
+                    className="w-full bg-neutral-mediumGray text-neutral-lightGray p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all shadow-md text-sm sm:text-base"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                  >
+                    Back
+                  </motion.button>
+                  <motion.button
+                    type="button"
+                    onClick={() => setShowModal(false)}
+                    className="w-full bg-neutral-mediumGray text-neutral-lightGray p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all text-sm sm:text-base"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                  >
+                    Cancel
+                  </motion.button>
+                </motion.div>
+              )}
+            </div>
+          </motion.div>
         </div>
       )}
     </div>

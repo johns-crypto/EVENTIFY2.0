@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { onAuthStateChanged, User } from 'firebase/auth';
-import { auth, loginUser, registerUser, logoutUser, getUserData } from '../services/firebase';
+import { doc, getDoc } from 'firebase/firestore'; // Import Firestore functions
+import { auth, loginUser, registerUser, logoutUser, getUserData, db } from '../services/firebase';
 import { toast } from 'react-toastify';
 
 interface AuthContextType {
@@ -10,7 +11,8 @@ interface AuthContextType {
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   register: (email: string, password: string, displayName?: string) => Promise<void>;
-  userProfile: { name?: string; profilePicture?: string; bio?: string } | null; // Added bio
+  userProfile: { name?: string; profilePicture?: string; bio?: string } | null;
+  isModerator: boolean; // Added isModerator
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -20,28 +22,37 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [userProfile, setUserProfile] = useState<{ name?: string; profilePicture?: string; bio?: string } | null>(null);
+  const [isModerator, setIsModerator] = useState<boolean>(false); // Added state for isModerator
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       setCurrentUser(user);
       if (user) {
-        const fetchUserProfile = async () => {
+        const fetchUserData = async () => {
           try {
+            // Fetch user profile
             const userData = await getUserData(user.uid);
             setUserProfile({
               name: userData?.displayName || user.displayName || user.email?.split('@')[0],
               profilePicture: userData?.photoURL || user.photoURL || undefined,
-              bio: userData?.bio || '', // Added bio
+              bio: userData?.bio || '',
             });
+
+            // Check if user is a moderator
+            const moderatorRef = doc(db, 'moderators', user.uid);
+            const moderatorDoc = await getDoc(moderatorRef);
+            setIsModerator(moderatorDoc.exists());
           } catch (err: any) {
-            console.error('Error fetching user profile:', err);
-            setError('Failed to load user profile: ' + err.message);
-            toast.error('Failed to load profile: ' + err.message);
+            console.error('Error fetching user data:', err);
+            setError('Failed to load user data: ' + err.message);
+            toast.error('Failed to load data: ' + err.message);
+            setIsModerator(false); // Default to false on error
           }
         };
-        fetchUserProfile();
+        fetchUserData();
       } else {
         setUserProfile(null);
+        setIsModerator(false); // Reset isModerator when user logs out
       }
       setLoading(false);
     });
@@ -59,8 +70,12 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       setUserProfile({
         name: userData?.displayName || user.displayName || user.email?.split('@')[0],
         profilePicture: userData?.photoURL || user.photoURL || undefined,
-        bio: userData?.bio || '', // Added bio
+        bio: userData?.bio || '',
       });
+      // Check if user is a moderator
+      const moderatorRef = doc(db, 'moderators', user.uid);
+      const moderatorDoc = await getDoc(moderatorRef);
+      setIsModerator(moderatorDoc.exists());
       toast.success('Logged in successfully!');
     } catch (err: any) {
       setError(err.message);
@@ -80,8 +95,12 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       setUserProfile({
         name: userData?.displayName || displayName || user.displayName || user.email?.split('@')[0],
         profilePicture: userData?.photoURL || user.photoURL || undefined,
-        bio: userData?.bio || '', // Added bio
+        bio: userData?.bio || '',
       });
+      // Check if user is a moderator (unlikely for new users, but included for consistency)
+      const moderatorRef = doc(db, 'moderators', user.uid);
+      const moderatorDoc = await getDoc(moderatorRef);
+      setIsModerator(moderatorDoc.exists());
       toast.success('Registered successfully!');
     } catch (err: any) {
       setError(err.message);
@@ -98,6 +117,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       await logoutUser();
       setCurrentUser(null);
       setUserProfile(null);
+      setIsModerator(false); // Reset isModerator on logout
       toast.success('Logged out successfully!');
     } catch (err: any) {
       setError(err.message);
@@ -108,7 +128,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   };
 
   return (
-    <AuthContext.Provider value={{ currentUser, loading, error, login, logout, register, userProfile }}>
+    <AuthContext.Provider value={{ currentUser, loading, error, login, logout, register, userProfile, isModerator }}>
       {!loading && children}
     </AuthContext.Provider>
   );

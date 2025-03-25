@@ -1,3 +1,4 @@
+/* app.css */
 #root {
   max-width: 1280px;
   margin: 0 auto;
@@ -39,4 +40,84 @@
 
 .read-the-docs {
   color: #888;
+}
+
+/* Event card styles */
+.event-card {
+  position: relative;
+  width: 18rem;
+  height: 20rem;
+  overflow: hidden;
+  border-radius: 0.5rem;
+}
+.event-card img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.event-card .overlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.7), transparent 70%);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 1rem;
+  color: white;
+}
+.event-card .overlay h3 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+}
+.event-card .overlay p {
+  font-size: 0.875rem;
+  margin-bottom: 0.5rem;
+}
+.event-card .overlay a {
+  display: inline-block;
+  padding: 0.25rem 0.75rem;
+  background-color: #dc2626;
+  border-radius: 9999px;
+  text-decoration: none;
+  color: white;
+  transition: background-color 0.3s;
+}
+.event-card .overlay a:hover {
+  background-color: #b91c1c;
+}
+
+/* Photo selection grid */
+.photo-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+.photo-grid img {
+  width: 100%;
+  height: 6rem;
+  object-fit: cover;
+  border-radius: 0.375rem;
+  cursor: pointer;
+  transition: transform 0.3s, opacity 0.3s;
+}
+.photo-grid img:hover {
+  transform: scale(1.05);
+  opacity: 0.9;
+}
+
+/* Gradient animation */
+@keyframes gradient-x {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 100% 50%; }
+}
+
+.animate-gradient-x {
+  background-size: 200% 200%;
+  animation: gradient-x 10s ease infinite;
+}
+
+.glow {
+  box-shadow: 0 0 15px rgba(255, 215, 0, 0.3);
 }

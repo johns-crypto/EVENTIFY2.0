@@ -23,8 +23,13 @@ import {
   QueryDocumentSnapshot,
   onSnapshot,
   QuerySnapshot,
+  limit,
+  startAfter,
+  deleteDoc,
 } from 'firebase/firestore';
 import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { EventData, NormalizedEventData, UserData, PostData, BusinessData, ChatData } from '../types';
+import { normalizeEventData } from '../utils/normalizeEvent';
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -59,14 +64,15 @@ export const registerUser = async (
   try {
     const userCredential = await createUserWithEmailAndPassword(auth, email, password);
     const user = userCredential.user;
-    await updateProfile(user, { displayName: displayName || 'Anonymous' });
+    const userDisplayName = displayName || 'Anonymous';
+    await updateProfile(user, { displayName: userDisplayName });
     await setDoc(doc(db, 'users', user.uid), {
-      displayName: displayName || 'Anonymous',
+      displayName: userDisplayName,
       email,
       createdAt: new Date().toISOString(),
       bio: '',
       location: '',
-      photoURL: '',
+      photoURL: user.photoURL || '',
       contactEmail: email,
       contactPhone: '',
       followers: [],
@@ -89,79 +95,8 @@ export const logoutUser = async (): Promise<void> => {
   }
 };
 
-// Data Interfaces
-export interface EventData {
-  id: string;
-  title: string;
-  userId: string;
-  createdAt: string;
-  date?: string;
-  location?: string;
-  image?: string;
-  category?: 'Refreshments' | 'Catering/Food' | 'Venue Provider';
-  organizerId?: string;
-  organizers: string[];
-  visibility: 'public' | 'private';
-  inviteLink?: string;
-  invitedUsers: string[];
-  pendingInvites: string[];
-  description?: string;
-}
-
-export interface PostData {
-  id: string;
-  userId: string;
-  eventId: string;
-  mediaUrl: string;
-  type: 'photo' | 'video';
-  visibility: 'public' | 'private';
-  likes: string[];
-  comments: { userId: string; text: string }[];
-  createdAt: string;
-}
-
-export interface ProductData {
-  name: string;
-  description: string;
-  imageUrl?: string;
-  inStock: boolean;
-}
-
-export interface BusinessData {
-  id: string;
-  name: string;
-  category: 'Refreshments' | 'Catering/Food' | 'Venue Provider';
-  description: string;
-  ownerId: string;
-  products: ProductData[];
-  photoURL?: string; // Added photoURL field
-}
-
-export interface UserData {
-  displayName: string;
-  email: string;
-  createdAt: string;
-  bio: string;
-  location: string;
-  photoURL: string;
-  contactEmail: string;
-  contactPhone: string;
-  followers: string[];
-  following: string[];
-  notificationsEnabled: boolean;
-}
-
-export interface ChatData {
-  id: string;
-  title: string;
-  admins: string[];
-  members: string[];
-  createdAt: string;
-  messages?: { userId: string; text: string; timestamp: string }[];
-}
-
 // Firestore Functions
-export const getEvents = async (): Promise<EventData[]> => {
+export const getEvents = async (): Promise<NormalizedEventData[]> => {
   try {
     const eventsCol = collection(db, 'events');
 
@@ -178,7 +113,7 @@ export const getEvents = async (): Promise<EventData[]> => {
       }
       return snapshot.docs.map((doc) => {
         const data = doc.data();
-        return {
+        const event = {
           id: doc.id,
           title: data.title || 'Untitled Event',
           userId: data.userId || data.organizerId || 'unknown',
@@ -186,7 +121,7 @@ export const getEvents = async (): Promise<EventData[]> => {
           date: data.date || '',
           location: data.location || '',
           image: data.image || data.imageUrl || '',
-          category: data.category || undefined,
+          category: data.category || 'General',
           organizerId: data.organizerId || undefined,
           organizers: data.organizers || [],
           visibility: data.visibility || 'public',
@@ -194,7 +129,10 @@ export const getEvents = async (): Promise<EventData[]> => {
           invitedUsers: data.invitedUsers || [],
           pendingInvites: data.pendingInvites || [],
           description: data.description || '',
+          creatorName: data.creatorName || 'Unknown User',
+          archived: data.archived ?? false,
         } as EventData;
+        return normalizeEventData(event);
       });
     }
 
@@ -233,11 +171,11 @@ export const getEvents = async (): Promise<EventData[]> => {
       followingQuery ? getDocs(followingQuery) : Promise.resolve({ docs: [] } as any),
     ]);
 
-    const eventMap = new Map<string, EventData>();
+    const eventMap = new Map<string, NormalizedEventData>();
     [publicSnapshot, organizerSnapshot, invitedSnapshot, followingSnapshot].forEach((snapshot) => {
       snapshot.docs.forEach((doc: QueryDocumentSnapshot<DocumentData>) => {
         const data = doc.data();
-        eventMap.set(doc.id, {
+        const event = {
           id: doc.id,
           title: data.title || 'Untitled Event',
           userId: data.userId || data.organizerId || 'unknown',
@@ -245,7 +183,7 @@ export const getEvents = async (): Promise<EventData[]> => {
           date: data.date || '',
           location: data.location || '',
           image: data.image || data.imageUrl || '',
-          category: data.category || undefined,
+          category: data.category || 'General',
           organizerId: data.organizerId || undefined,
           organizers: data.organizers || [],
           visibility: data.visibility || 'public',
@@ -253,7 +191,10 @@ export const getEvents = async (): Promise<EventData[]> => {
           invitedUsers: data.invitedUsers || [],
           pendingInvites: data.pendingInvites || [],
           description: data.description || '',
-        } as EventData);
+          creatorName: data.creatorName || 'Unknown User',
+          archived: data.archived ?? false,
+        } as EventData;
+        eventMap.set(doc.id, normalizeEventData(event));
       });
     });
 
@@ -271,7 +212,7 @@ export const getEvents = async (): Promise<EventData[]> => {
   }
 };
 
-export const getUserEvents = async (userId: string): Promise<EventData[]> => {
+export const getUserEvents = async (userId: string): Promise<NormalizedEventData[]> => {
   try {
     const eventsCol = collection(db, 'events');
     const userDoc = await getDoc(doc(db, 'users', userId));
@@ -308,11 +249,11 @@ export const getUserEvents = async (userId: string): Promise<EventData[]> => {
       followingQuery ? getDocs(followingQuery) : Promise.resolve({ docs: [] } as any),
     ]);
 
-    const eventMap = new Map<string, EventData>();
+    const eventMap = new Map<string, NormalizedEventData>();
     [publicSnapshot, organizerSnapshot, invitedSnapshot, followingSnapshot].forEach((snapshot) => {
       snapshot.docs.forEach((doc: QueryDocumentSnapshot<DocumentData>) => {
         const data = doc.data();
-        eventMap.set(doc.id, {
+        const event = {
           id: doc.id,
           title: data.title || 'Untitled Event',
           userId: data.userId || data.organizerId || 'unknown',
@@ -320,7 +261,7 @@ export const getUserEvents = async (userId: string): Promise<EventData[]> => {
           date: data.date || '',
           location: data.location || '',
           image: data.image || data.imageUrl || '',
-          category: data.category || undefined,
+          category: data.category || 'General',
           organizerId: data.organizerId || undefined,
           organizers: data.organizers || [],
           visibility: data.visibility || 'public',
@@ -328,7 +269,10 @@ export const getUserEvents = async (userId: string): Promise<EventData[]> => {
           invitedUsers: data.invitedUsers || [],
           pendingInvites: data.pendingInvites || [],
           description: data.description || '',
-        } as EventData);
+          creatorName: data.creatorName || 'Unknown User',
+          archived: data.archived ?? false,
+        } as EventData;
+        eventMap.set(doc.id, normalizeEventData(event));
       });
     });
 
@@ -352,7 +296,23 @@ export const getUserData = async (userId: string): Promise<UserData | null> => {
     const userSnapshot = await getDoc(userDocRef);
     if (!userSnapshot.exists()) {
       console.warn(`No user document found for UID: ${userId}`);
-      return null;
+      // Create a default user document
+      const defaultUserData: UserData = {
+        displayName: 'Anonymous',
+        email: '',
+        createdAt: new Date().toISOString(),
+        bio: '',
+        location: '',
+        photoURL: '',
+        contactEmail: '',
+        contactPhone: '',
+        followers: [],
+        following: [],
+        notificationsEnabled: true,
+      };
+      await setDoc(userDocRef, defaultUserData);
+      console.log(`Created default user document for UID: ${userId}`);
+      return defaultUserData;
     }
     const data = userSnapshot.data();
     return {
@@ -428,7 +388,7 @@ export const getBusinesses = async (): Promise<BusinessData[]> => {
         description: data.description || '',
         ownerId: data.ownerId || 'unknown',
         products: data.products || [],
-        photoURL: data.photoURL || '', // Added photoURL
+        photoURL: data.photoURL || '',
       } as BusinessData;
     });
     return businessList;
@@ -478,4 +438,7 @@ export {
   ref,
   uploadBytes,
   getDownloadURL,
+  limit,
+  startAfter,
+  deleteDoc,
 };

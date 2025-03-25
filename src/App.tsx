@@ -8,8 +8,8 @@ import { AuthProvider } from './context/AuthContext';
 // Lazy-loaded components
 const Home = lazy(() => import('./pages/Home'));
 const Events = lazy(() => import('./pages/Events'));
-const Business = lazy(() => import('./pages/Business'));
-const BusinessProfile = lazy(() => import('./pages/BusinessProfile'));
+const Businesses = lazy(() => import('./pages/Businesses'));
+const BusinessProfile = lazy(() => import('./pages/BusinessProfiles'));
 const Profile = lazy(() => import('./pages/Profile'));
 const Register = lazy(() => import('./pages/Register'));
 const Login = lazy(() => import('./pages/Login'));
@@ -20,6 +20,9 @@ const ForgotPassword = lazy(() => import('./pages/ForgotPassword'));
 const Settings = lazy(() => import('./pages/Settings'));
 const Chat = lazy(() => import('./pages/Chat'));
 const MediaEditor = lazy(() => import('./pages/MediaEditor'));
+const Notifications = lazy(() => import('./pages/Notifications'));
+
+
 
 // Error Boundary Component
 interface ErrorBoundaryProps {
@@ -87,7 +90,7 @@ function App() {
               <Routes>
                 <Route path="/" element={<Home />} />
                 <Route path="/events" element={<Events />} />
-                <Route path="/business" element={<Business />} />
+                <Route path="/businesses" element={<Businesses />} />
                 <Route path="/business-profile" element={<BusinessProfile />} />
                 <Route path="/profile" element={<Profile />} />
                 <Route path="/register" element={<Register />} />
@@ -97,9 +100,14 @@ function App() {
                 <Route path="/about" element={<About />} />
                 <Route path="/forgot-password" element={<ForgotPassword />} />
                 <Route path="/settings" element={<Settings />} />
-                <Route path="/chat" element={<Navigate to="/events" replace />} />
+                {/* Redirect /chat to /events to prevent accessing Chat without an eventId */}
+                *<Route path="/chat" element={<Navigate to="/events" replace />} />
+                {/* Chat route for specific events, where :eventId corresponds to an event */}
                 <Route path="/chat/:eventId" element={<Chat />} />
+                {/* Optional: Add a /chats route to list all chats across events */}
+                 <Route path="/chat" element={<Chat />} /> 
                 <Route path="/media-editor" element={<MediaEditor />} />
+                <Route path="/notifications" element={<Notifications />} />
                 <Route path="*" element={<div className="text-neutral-lightGray text-center mt-20">404 - Not Found</div>} />
               </Routes>
             </Sidebar>
@@ -115,7 +123,7 @@ function App() {
           pauseOnFocusLoss
           draggable
           pauseOnHover
-          theme="colored"
+          theme="dark"
         />
       </div>
     </AuthProvider>
