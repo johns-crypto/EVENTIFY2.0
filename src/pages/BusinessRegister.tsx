@@ -1,16 +1,16 @@
-// src/pages/Register.tsx
-import { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+// src/pages/BusinessRegister.tsx
+import { useState, useEffect, useRef } from 'react'; // Add useRef
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { doc, setDoc, getDoc } from 'firebase/firestore';
 import { auth, db } from '../services/firebase';
-import { updateProfile, GoogleAuthProvider, FacebookAuthProvider, signInWithPopup } from 'firebase/auth';
+import { updateProfile, GoogleAuthProvider, FacebookAuthProvider, signInWithRedirect, getRedirectResult } from 'firebase/auth';
 import { uploadImageToCloudinary } from '../utils/cloudinary';
 import { toast } from 'react-toastify';
-import { FaEnvelope, FaLock, FaUser, FaGoogle, FaFacebook, FaCamera, FaEye, FaEyeSlash } from 'react-icons/fa';
+import { FaEnvelope, FaLock, FaUser, FaGoogle, FaFacebook, FaCamera, FaEye, FaEyeSlash, FaTimes } from 'react-icons/fa';
 
-function Register() {
-  const { register, userRole } = useAuth();
+function BusinessRegister() {
+  const { register, currentUser } = useAuth();
   const navigate = useNavigate();
 
   const [formData, setFormData] = useState({
@@ -31,6 +31,84 @@ function Register() {
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [passwordStrength, setPasswordStrength] = useState(0);
+  const [isOpen, setIsOpen] = useState(true);
+  const [isSocialLoginRedirect, setIsSocialLoginRedirect] = useState(false);
+  const emailInputRef = useRef<HTMLInputElement>(null); // Add ref for email input
+
+  useEffect(() => {
+    if (!isSocialLoginRedirect) return;
+
+    const handleRedirectResult = async () => {
+      try {
+        console.log('Checking for redirect result...');
+        const result = await getRedirectResult(auth);
+        if (result) {
+          console.log('Redirect result received:', result);
+          const user = result.user;
+          const userDoc = await getDoc(doc(db, 'users', user.uid));
+          if (!userDoc.exists()) {
+            console.log('Creating new user document for UID:', user.uid);
+            await setDoc(doc(db, 'users', user.uid), {
+              displayName: user.displayName || 'Anonymous',
+              email: user.email || '',
+              createdAt: new Date().toISOString(),
+              bio: '',
+              location: '',
+              photoURL: user.photoURL || '',
+              contactEmail: user.email || '',
+              contactPhone: '',
+              followers: [],
+              following: [],
+              notificationsEnabled: true,
+              role: 'serviceProvider',
+            });
+          } else {
+            console.log('User document already exists:', userDoc.data());
+          }
+
+          const redirectUrl = localStorage.getItem('redirectAfterAuth');
+          console.log('Redirect URL from local storage:', redirectUrl);
+          if (redirectUrl) {
+            localStorage.removeItem('redirectAfterAuth');
+            navigate(redirectUrl);
+          } else {
+            navigate('/business-profiles');
+          }
+        } else {
+          console.log('No redirect result found.');
+        }
+      } catch (err: any) {
+        console.error('Error handling redirect result:', err);
+        let errorMessage = err.message || 'Failed to complete registration. Please try again.';
+        if (err.message.includes('network')) {
+          errorMessage = 'Failed to connect to the authentication provider. Please disable ad blockers or privacy extensions and try again.';
+        }
+        setErrors((prev) => ({
+          ...prev,
+          general: errorMessage,
+        }));
+        toast.error(errorMessage);
+      } finally {
+        setLoading(false);
+        setIsSocialLoginRedirect(false);
+      }
+    };
+
+    handleRedirectResult();
+  }, [isSocialLoginRedirect, navigate]);
+
+  useEffect(() => {
+    // If the user is already logged in and has the correct role, redirect them
+    if (currentUser) {
+      const checkUserRole = async () => {
+        const userDoc = await getDoc(doc(db, 'users', currentUser.uid));
+        if (userDoc.exists() && userDoc.data().role === 'serviceProvider') {
+          navigate('/business-profiles');
+        }
+      };
+      checkUserRole();
+    }
+  }, [currentUser, navigate]);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const { name, value } = e.target;
@@ -76,7 +154,7 @@ function Register() {
     }
 
     if (!formData.displayName) {
-      newErrors.displayName = 'Name is required';
+      newErrors.displayName = 'Business Name is required';
       isValid = false;
     }
 
@@ -92,16 +170,19 @@ function Register() {
     setErrors({ email: '', password: '', displayName: '', general: '' });
 
     try {
+      console.log('Registering user with email:', formData.email);
       await register(formData.email, formData.password, formData.displayName);
       const user = auth.currentUser;
       if (!user) throw new Error('User not found after registration');
 
       let photoURL = '';
       if (photoFile) {
+        console.log('Uploading photo to Cloudinary...');
         photoURL = await uploadImageToCloudinary(photoFile);
         await updateProfile(user, { photoURL });
       }
 
+      console.log('Creating user document for UID:', user.uid);
       await setDoc(doc(db, 'users', user.uid), {
         displayName: formData.displayName,
         email: formData.email,
@@ -114,13 +195,30 @@ function Register() {
         followers: [],
         following: [],
         notificationsEnabled: true,
-        role: 'user',
+        role: 'serviceProvider',
       });
 
-      navigate('/events');
+      console.log('Registration successful, navigating to /business-profiles');
+      navigate('/business-profiles');
     } catch (err: any) {
-      setErrors((prev) => ({ ...prev, general: err.message || 'Registration failed.' }));
-      toast.error('Registration failed: ' + err.message);
+      console.error('Error during registration:', err);
+      let errorMessage;
+      if (err.code === 'auth/email-already-in-use') {
+        errorMessage = 'This email is already in use. Try logging in or resetting your password.';
+        setFormData((prev) => ({ ...prev, email: '' })); // Clear the email field
+        if (emailInputRef.current) {
+          emailInputRef.current.focus(); // Focus the email input
+        }
+      } else if (err.message.includes('network')) {
+        errorMessage = 'Failed to connect to the authentication provider. Please disable ad blockers or privacy extensions and try again.';
+      } else {
+        errorMessage = err.message || 'Registration failed.';
+      }
+      setErrors((prev) => ({
+        ...prev,
+        general: errorMessage,
+      }));
+      toast.error(errorMessage);
     } finally {
       setLoading(false);
       if (photoPreview) {
@@ -132,46 +230,44 @@ function Register() {
 
   const handleSocialLogin = async (providerType: 'google' | 'facebook') => {
     setLoading(true);
+    setIsSocialLoginRedirect(true);
     try {
+      console.log(`Initiating ${providerType} social login...`);
       const provider = providerType === 'google' ? new GoogleAuthProvider() : new FacebookAuthProvider();
-      const result = await signInWithPopup(auth, provider);
-      const user = result.user;
-      const userDoc = await getDoc(doc(db, 'users', user.uid));
-      if (!userDoc.exists()) {
-        await setDoc(doc(db, 'users', user.uid), {
-          displayName: user.displayName || 'Anonymous',
-          email: user.email || '',
-          createdAt: new Date().toISOString(),
-          bio: '',
-          location: '',
-          photoURL: user.photoURL || '',
-          contactEmail: user.email || '',
-          contactPhone: '',
-          followers: [],
-          following: [],
-          notificationsEnabled: true,
-          role: 'user',
-        });
-      }
-      navigate(userRole === 'serviceProvider' ? '/business-profiles' : '/events');
+      localStorage.setItem('redirectAfterAuth', '/business-profiles');
+      await signInWithRedirect(auth, provider);
     } catch (err: any) {
       console.error(`Error during ${providerType} registration:`, err);
+      let errorMessage = err.message || `Failed to initiate registration with ${providerType}. Please try again.`;
+      if (err.message.includes('network')) {
+        errorMessage = `Failed to connect to ${providerType}. Please disable ad blockers or privacy extensions and try again.`;
+      }
       setErrors((prev) => ({
         ...prev,
-        general:
-          err.message ||
-          `Failed to register with ${providerType}. Please disable any ad blockers or privacy extensions and try again.`,
+        general: errorMessage,
       }));
-      toast.error(
-        `Failed to register with ${providerType}. Please disable any ad blockers or privacy extensions and try again.`
-      );
+      toast.error(errorMessage);
       setLoading(false);
+      setIsSocialLoginRedirect(false);
     }
   };
 
+  const closeModal = () => {
+    setIsOpen(false);
+    navigate('/');
+  };
+
+  if (!isOpen) return null;
+
   return (
-    <div className="min-h-screen flex items-center justify-center py-6 px-4 sm:px-6 lg:px-8 bg-gradient-to-br from-indigo-100 via-white to-blue-100">
-      <div className="w-full max-w-md bg-white p-6 sm:p-8 rounded-2xl shadow-2xl border border-gray-200 relative">
+    <div className="fixed inset-0 flex items-center justify-center z-50 bg-black bg-opacity-50">
+      <div className="w-full max-w-md bg-white p-6 sm:p-8 rounded-2xl shadow-2xl border border-gray-200 relative max-h-[90vh] overflow-y-auto">
+        <button
+          onClick={closeModal}
+          className="absolute top-4 right-4 text-gray-600 hover:text-gray-800 focus:outline-none"
+        >
+          <FaTimes size={20} />
+        </button>
         {loading && (
           <div className="absolute inset-0 bg-gray-200 bg-opacity-50 flex items-center justify-center rounded-2xl">
             <svg
@@ -190,16 +286,16 @@ function Register() {
           </div>
         )}
         <h2 className="text-2xl sm:text-3xl font-bold text-center text-indigo-900 mb-3">
-          Join Eventify
+          Join Eventify as a Service Provider
         </h2>
         <p className="text-center text-gray-600 mb-6 text-sm sm:text-base">
-          Create an account to start your journey
+          Create a business account to offer your services
         </p>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label htmlFor="email" className="block text-sm font-medium text-gray-700">
-              Email Address
+              Business Email Address
             </label>
             <div className="relative mt-1">
               <FaEnvelope className="absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400" size={18} />
@@ -209,10 +305,11 @@ function Register() {
                 type="email"
                 value={formData.email}
                 onChange={handleInputChange}
+                ref={emailInputRef} // Add ref to the email input
                 className={`w-full pl-12 pr-4 py-3 rounded-lg bg-gray-50 border ${
-                  errors.email ? 'border-red-500' : 'border-gray-200'
+                  errors.email || errors.general.includes('email is already in use') ? 'border-red-500' : 'border-gray-200'
                 } text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow-md`}
-                placeholder="you@example.com"
+                placeholder="business@example.com"
                 disabled={loading}
               />
             </div>
@@ -236,11 +333,13 @@ function Register() {
                 } text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow-md`}
                 placeholder="••••••"
                 disabled={loading}
+                autoComplete="new-password"
               />
               <button
                 type="button"
                 onClick={() => setShowPassword(!showPassword)}
                 className="absolute right-4 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600 focus:outline-none"
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
               >
                 {showPassword ? <FaEyeSlash size={18} /> : <FaEye size={18} />}
               </button>
@@ -258,7 +357,7 @@ function Register() {
                         : passwordStrength <= 75
                         ? 'bg-blue-500'
                         : 'bg-green-500'
-                    }`}
+                    } strength-bar-${passwordStrength}`}
                     style={{ width: `${passwordStrength}%` }}
                   />
                 </div>
@@ -278,10 +377,10 @@ function Register() {
 
           <div>
             <label htmlFor="displayName" className="block text-sm font-medium text-gray-700">
-              Full Name
+              Business Name
             </label>
             <div className="relative mt-1">
-              <FaUser className="absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400" size={18} />
+              <FaUser className="absolute left-4 top-1/2 transform -translate-y-1/2 thext-gray-400" size={18} />
               <input
                 id="displayName"
                 name="displayName"
@@ -291,7 +390,7 @@ function Register() {
                 className={`w-full pl-12 pr-4 py-3 rounded-lg bg-gray-50 border ${
                   errors.displayName ? 'border-red-500' : 'border-gray-200'
                 } text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow-md`}
-                placeholder="Your Name"
+                placeholder="Your Business Name"
                 disabled={loading}
               />
             </div>
@@ -300,7 +399,7 @@ function Register() {
 
           <div>
             <label htmlFor="bio" className="block text-sm font-medium text-gray-700">
-              Bio (Optional)
+              Business Bio (Optional)
             </label>
             <textarea
               id="bio"
@@ -308,7 +407,7 @@ function Register() {
               value={formData.bio}
               onChange={handleInputChange}
               className="w-full mt-1 p-4 rounded-lg bg-gray-50 border border-gray-200 text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow-md"
-              placeholder="Tell us about yourself"
+              placeholder="Tell us about your business"
               rows={3}
               disabled={loading}
             />
@@ -316,7 +415,7 @@ function Register() {
 
           <div>
             <label htmlFor="location" className="block text-sm font-medium text-gray-700">
-              Location (Optional)
+              Business Location (Optional)
             </label>
             <input
               id="location"
@@ -332,7 +431,7 @@ function Register() {
 
           <div>
             <label htmlFor="photoUpload" className="block text-sm font-medium text-gray-700">
-              Profile Photo (Optional)
+              Business Profile Photo (Optional)
             </label>
             <div className="relative mt-1">
               <FaCamera className="absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400" size={18} />
@@ -349,30 +448,48 @@ function Register() {
               <div className="mt-3 flex justify-center">
                 <img
                   src={photoPreview}
-                  alt="Profile preview"
+                  alt="Business profile preview"
                   className="w-24 h-24 rounded-full object-cover border-2 border-indigo-300 shadow-sm"
                 />
               </div>
             )}
           </div>
 
-          {errors.general && <p className="text-center text-red-500 text-sm">{errors.general}</p>}
+          {errors.general && (
+            <p className="text-center text-red-500 text-sm">
+              {errors.general.includes('email is already in use') ? (
+                <>
+                  This email is already in use. Try{' '}
+                  <button
+                    onClick={() => navigate('/business-login')}
+                    className="text-indigo-600 hover:underline font-semibold focus:outline-none"
+                    disabled={loading}
+                  >
+                    logging in
+                  </button>{' '}
+                  or{' '}
+                  <button
+                    onClick={() => navigate('/forgot-password')}
+                    className="text-indigo-600 hover:underline font-semibold focus:outline-none"
+                    disabled={loading}
+                  >
+                    resetting your password
+                  </button>.
+                </>
+              ) : (
+                errors.general
+              )}
+            </p>
+          )}
 
           <button
             type="submit"
             className="w-full bg-gradient-to-r from-indigo-600 to-indigo-700 text-white px-6 py-3 rounded-lg font-semibold hover:from-indigo-500 hover:to-indigo-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 flex items-center justify-center transition-all duration-300 hover:scale-105 shadow-md"
             disabled={loading}
           >
-            Register
+            Register Business
           </button>
         </form>
-
-        <div className="mt-4 text-center text-sm text-gray-600">
-          <p>
-            Note: If you have an ad blocker or privacy extension enabled, you may need to disable it to use Google or
-            Facebook login.
-          </p>
-        </div>
 
         <div className="mt-6 space-y-3">
           <button
@@ -395,10 +512,14 @@ function Register() {
 
         <div className="mt-6 text-center space-y-2">
           <p className="text-sm text-gray-600">
-            Already have an account?{' '}
-            <Link to="/login" className="text-indigo-600 hover:underline font-semibold">
+            Already have a business account?{' '}
+            <button
+              onClick={() => navigate('/business-login')}
+              className="text-indigo-600 hover:underline font-semibold focus:outline-none"
+              disabled={loading}
+            >
               Login
-            </Link>
+            </button>
           </p>
         </div>
       </div>
@@ -406,4 +527,4 @@ function Register() {
   );
 }
 
-export default Register;
+export default BusinessRegister;

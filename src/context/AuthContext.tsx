@@ -1,18 +1,20 @@
+// src/context/AuthContext.tsx
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { onAuthStateChanged, User } from 'firebase/auth';
-import { doc, getDoc } from 'firebase/firestore'; // Import Firestore functions
-import { auth, loginUser, registerUser, logoutUser, getUserData, db } from '../services/firebase';
+import { onAuthStateChanged, User, getRedirectResult } from 'firebase/auth';
+import { doc, getDoc } from 'firebase/firestore';
+import { auth, loginUser, registerUser, logoutUser, getUserData, db, loginWithGoogle } from '../services/firebase';
 import { toast } from 'react-toastify';
 
 interface AuthContextType {
   currentUser: User | null;
   loading: boolean;
   error: string | null;
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string, useGoogle?: boolean) => Promise<void>;
   logout: () => Promise<void>;
-  register: (email: string, password: string, displayName?: string) => Promise<void>;
+  register: (email: string, password: string, displayName?: string, role?: string) => Promise<void>;
   userProfile: { name?: string; profilePicture?: string; bio?: string } | null;
-  isModerator: boolean; // Added isModerator
+  userRole: string | null;
+  setUserRole: (role: string) => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -22,15 +24,14 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [userProfile, setUserProfile] = useState<{ name?: string; profilePicture?: string; bio?: string } | null>(null);
-  const [isModerator, setIsModerator] = useState<boolean>(false); // Added state for isModerator
+  const [userRole, setUserRole] = useState<string | null>(null);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
+    const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
       setCurrentUser(user);
       if (user) {
         const fetchUserData = async () => {
           try {
-            // Fetch user profile
             const userData = await getUserData(user.uid);
             setUserProfile({
               name: userData?.displayName || user.displayName || user.email?.split('@')[0],
@@ -38,33 +39,43 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
               bio: userData?.bio || '',
             });
 
-            // Check if user is a moderator
-            const moderatorRef = doc(db, 'moderators', user.uid);
-            const moderatorDoc = await getDoc(moderatorRef);
-            setIsModerator(moderatorDoc.exists());
+            const userDocRef = doc(db, 'users', user.uid);
+            const userDoc = await getDoc(userDocRef);
+            if (userDoc.exists()) {
+              const data = userDoc.data();
+              const newRole = data.role || 'user';
+              setUserRole(newRole);
+            } else {
+              setUserRole('user');
+            }
           } catch (err: any) {
             console.error('Error fetching user data:', err);
             setError('Failed to load user data: ' + err.message);
             toast.error('Failed to load data: ' + err.message);
-            setIsModerator(false); // Default to false on error
+            setUserRole('user');
           }
         };
         fetchUserData();
       } else {
         setUserProfile(null);
-        setIsModerator(false); // Reset isModerator when user logs out
+        setUserRole(null);
       }
       setLoading(false);
     });
 
-    return () => unsubscribe();
+    return () => unsubscribeAuth();
   }, []);
 
-  const login = async (email: string, password: string) => {
+  const login = async (email: string, password: string, useGoogle: boolean = false) => {
     setLoading(true);
     setError(null);
     try {
-      const user = await loginUser(email, password);
+      let user;
+      if (useGoogle) {
+        user = await loginWithGoogle();
+      } else {
+        user = await loginUser(email, password);
+      }
       setCurrentUser(user);
       const userData = await getUserData(user.uid);
       setUserProfile({
@@ -72,24 +83,44 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         profilePicture: userData?.photoURL || user.photoURL || undefined,
         bio: userData?.bio || '',
       });
-      // Check if user is a moderator
-      const moderatorRef = doc(db, 'moderators', user.uid);
-      const moderatorDoc = await getDoc(moderatorRef);
-      setIsModerator(moderatorDoc.exists());
+      const userDoc = await getDoc(doc(db, 'users', user.uid));
+      if (userDoc.exists()) {
+        const data = userDoc.data();
+        const newRole = data.role || 'user';
+        if (newRole !== userRole) {
+          setUserRole(newRole);
+          toast.info(`Your role has been updated to: ${newRole}`);
+        }
+      } else {
+        setUserRole('user');
+      }
       toast.success('Logged in successfully!');
     } catch (err: any) {
-      setError(err.message);
-      toast.error('Login failed: ' + err.message);
+      let errorMessage = 'Login failed: ' + err.message;
+      if (err.code === 'auth/wrong-password') {
+        errorMessage = 'Incorrect password. Please try again.';
+      } else if (err.code === 'auth/user-not-found') {
+        errorMessage = 'No account found with this email.';
+      } else if (err.code === 'auth/too-many-requests') {
+        errorMessage = 'Too many attempts. Please try again later.';
+      } else if (err.code === 'auth/popup-closed-by-user') {
+        errorMessage = 'Authentication popup was closed. Please try again.';
+      } else if (err.code === 'auth/popup-blocked') {
+        errorMessage = 'Authentication popup was blocked by the browser. Please allow popups and try again.';
+      }
+      setError(errorMessage);
+      toast.error(errorMessage);
+      throw err;
     } finally {
       setLoading(false);
     }
   };
 
-  const register = async (email: string, password: string, displayName?: string) => {
+  const register = async (email: string, password: string, displayName?: string, role: string = 'user') => {
     setLoading(true);
     setError(null);
     try {
-      const user = await registerUser(email, password, displayName);
+      const user = await registerUser(email, password, displayName, role);
       setCurrentUser(user);
       const userData = await getUserData(user.uid);
       setUserProfile({
@@ -97,14 +128,30 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         profilePicture: userData?.photoURL || user.photoURL || undefined,
         bio: userData?.bio || '',
       });
-      // Check if user is a moderator (unlikely for new users, but included for consistency)
-      const moderatorRef = doc(db, 'moderators', user.uid);
-      const moderatorDoc = await getDoc(moderatorRef);
-      setIsModerator(moderatorDoc.exists());
+      const userDoc = await getDoc(doc(db, 'users', user.uid));
+      if (userDoc.exists()) {
+        const data = userDoc.data();
+        const newRole = data.role || 'user';
+        if (newRole !== userRole) {
+          setUserRole(newRole);
+          toast.info(`Your role has been updated to: ${newRole}`);
+        }
+      } else {
+        setUserRole('user');
+      }
       toast.success('Registered successfully!');
     } catch (err: any) {
-      setError(err.message);
-      toast.error('Registration failed: ' + err.message);
+      let errorMessage = 'Registration failed: ' + err.message;
+      if (err.code === 'auth/email-already-in-use') {
+        errorMessage = 'This email is already in use. Please use a different email.';
+      } else if (err.code === 'auth/weak-password') {
+        errorMessage = 'Password is too weak. Please use a stronger password.';
+      } else if (err.code === 'auth/invalid-email') {
+        errorMessage = 'Invalid email format.';
+      }
+      setError(errorMessage);
+      toast.error(errorMessage);
+      throw err;
     } finally {
       setLoading(false);
     }
@@ -117,7 +164,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       await logoutUser();
       setCurrentUser(null);
       setUserProfile(null);
-      setIsModerator(false); // Reset isModerator on logout
+      setUserRole(null);
       toast.success('Logged out successfully!');
     } catch (err: any) {
       setError(err.message);
@@ -127,8 +174,27 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }
   };
 
+  const handleSetUserRole = (newRole: string) => {
+    if (newRole !== userRole) {
+      setUserRole(newRole);
+      toast.info(`Your role has been updated to: ${newRole}`);
+    }
+  };
+
   return (
-    <AuthContext.Provider value={{ currentUser, loading, error, login, logout, register, userProfile, isModerator }}>
+    <AuthContext.Provider
+      value={{
+        currentUser,
+        loading,
+        error,
+        login,
+        logout,
+        register,
+        userProfile,
+        userRole,
+        setUserRole: handleSetUserRole,
+      }}
+    >
       {!loading && children}
     </AuthContext.Provider>
   );

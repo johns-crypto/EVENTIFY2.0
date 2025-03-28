@@ -1,632 +1,576 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+// src/pages/Businesses.tsx
+import { useState, useEffect, useCallback, memo } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { db } from '../services/firebase';
-import { collection, addDoc, doc, updateDoc, query, where, getDocs } from 'firebase/firestore';
+import { db, collection, query, where, onSnapshot, doc, updateDoc, addDoc, getDocs, limit, getBusinesses } from '../services/firebase';
 import { motion } from 'framer-motion';
-import { FaSave, FaPlus, FaTrash, FaFilter, FaCheckCircle, FaTimesCircle, FaTimes, FaRedo } from 'react-icons/fa';
+import { FaPlus, FaTrash, FaCheckCircle, FaTimesCircle, FaSpinner, FaCalendarPlus, FaEllipsisV, FaSearch, FaFilter } from 'react-icons/fa';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'react-toastify';
-import debounce from 'lodash/debounce';
 
-type Category = 'Refreshments' | 'Catering/Food' | 'Venue Provider';
-
+// Interface Definitions
 interface Product {
   name: string;
   description: string;
   imageUrl?: string;
   inStock: boolean;
-  file?: File; // For new products being added
+  businessId: string;
 }
 
 interface Business {
   id: string;
   name: string;
-  category: Category;
-  description: string;
-  ownerId: string;
   products: Product[];
+  ownerId: string;
+  category?: string; // Added category to match BusinessData
 }
 
-interface ProductFilter {
-  showInStockOnly: boolean;
-  sortBy: 'name' | 'stock';
+interface Event {
+  id: string;
+  title: string;
+  date: string;
+  ownerId: string;
+  products?: { name: string; businessId: string }[];
 }
 
-interface FormErrors {
-  name: string;
-  category: string;
-  description: string;
+interface Notification {
+  id?: string;
+  businessId: string;
   productName: string;
-  productDescription: string;
+  eventId: string;
+  eventTitle: string;
+  timestamp: string;
+  read: boolean;
 }
 
-// Custom component for lazy loading images
-const LazyImage = ({ src, alt, className }: { src: string; alt: string; className: string }) => {
-  const imgRef = useRef<HTMLImageElement>(null);
-  const [shouldLoad, setShouldLoad] = useState(false);
-
-  useEffect(() => {
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0].isIntersecting) {
-          setShouldLoad(true);
-          observer.disconnect();
-        }
-      },
-      { rootMargin: '100px' }
-    );
-
-    if (imgRef.current) {
-      observer.observe(imgRef.current);
-    }
-
-    return () => observer.disconnect();
-  }, []);
+// LazyImage Component for optimized image loading
+const LazyImage = memo(({ src, alt, className }: { src: string; alt: string; className: string }) => {
+  const [isLoaded, setIsLoaded] = useState(false);
 
   return (
     <img
-      ref={imgRef}
-      src={shouldLoad ? src : undefined}
+      src={src}
       alt={alt}
-      className={className}
+      className={`${className} opacity-0 transition-opacity duration-300 ${isLoaded ? 'opacity-100' : ''}`}
+      onLoad={() => setIsLoaded(true)}
       loading="lazy"
     />
   );
-};
+});
 
-// Function to upload image to Cloudinary
-const uploadImageToCloudinary = async (file: File): Promise<string> => {
-  const cloudName = 'your-cloud-name'; // Replace with your Cloudinary cloud name
-  const uploadPreset = 'your-upload-preset'; // Replace with your Cloudinary upload preset
+// Memoized Product Card Component to display individual products
+const ProductCard = memo(
+  ({
+    product,
+    index,
+    businesses,
+    setSelectedProduct,
+    setShowAddToEventModal,
+    showMenu,
+    setShowMenu,
+    navigate,
+  }: {
+    product: Product;
+    index: number;
+    businesses: Business[];
+    setSelectedProduct: (product: Product | null) => void;
+    setShowAddToEventModal: (show: boolean) => void;
+    showMenu: number | null;
+    setShowMenu: (index: number | null) => void;
+    navigate: (path: string) => void;
+  }) => {
+    const fadeIn = { hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 0, transition: { duration: 0.6 } } };
+    const business = businesses.find((b) => b.id === product.businessId);
 
-  const formData = new FormData();
-  formData.append('file', file);
-  formData.append('upload_preset', uploadPreset);
+    return (
+      <motion.div
+        className="relative bg-gray-700/50 backdrop-blur-sm rounded-xl overflow-hidden shadow-lg hover:shadow-xl transition-all duration-300 border border-gray-600/30 h-64"
+        variants={fadeIn}
+      >
+        {/* Product Image */}
+        <LazyImage
+          src={product.imageUrl || 'https://via.placeholder.com/300'}
+          alt={product.name}
+          className="absolute inset-0 w-full h-full object-cover"
+        />
+        {/* Gradient Overlay */}
+        <div className="absolute inset-0 bg-gradient-to-t from-gray-900/80 to-transparent"></div>
 
-  const response = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
-    method: 'POST',
-    body: formData,
-  });
+        {/* Three-Dot Menu */}
+        <div className="absolute top-3 right-3">
+          <button
+            onClick={() => setShowMenu(index === showMenu ? null : index)}
+            className="text-gray-200 hover:text-yellow-400 transition-colors"
+            aria-label="More options"
+          >
+            <FaEllipsisV size={20} />
+          </button>
+          {showMenu === index && (
+            <motion.div
+              className="absolute right-0 mt-2 w-48 bg-gray-800/90 backdrop-blur-md rounded-lg shadow-lg border border-gray-700/30 z-10"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+            >
+              <div className="p-2">
+                <p className="text-gray-300 text-sm px-2 py-1">
+                  <strong>Business:</strong> {business?.name}
+                </p>
+                <button
+                  onClick={() => navigate(`/business-profiles/${business?.id}`)}
+                  className="w-full text-left px-2 py-1 text-gray-300 hover:bg-gray-700/50 rounded transition-colors text-sm"
+                >
+                  View Business
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </div>
 
-  if (!response.ok) {
-    throw new Error('Failed to upload image to Cloudinary');
+        {/* Product Info Overlay */}
+        <div className="absolute bottom-4 left-4 right-4">
+          <h3 className="text-xl sm:text-2xl font-semibold text-white">{product.name}</h3>
+          <p className="text-gray-400 text-sm">by {business?.name}</p>
+          <p className="text-gray-300 text-sm line-clamp-2">{product.description}</p>
+          <p className="text-gray-400 text-sm mt-1">
+            {product.inStock ? (
+              <span className="text-green-400 flex items-center">
+                <FaCheckCircle className="mr-1" /> In Stock
+              </span>
+            ) : (
+              <span className="text-red-400 flex items-center">
+                <FaTimesCircle className="mr-1" /> Out of Stock
+              </span>
+            )}
+          </p>
+        </div>
+
+        {/* Add to Event Button */}
+        <div className="absolute bottom-4 right-4">
+          <button
+            onClick={() => {
+              setSelectedProduct(product);
+              setShowAddToEventModal(true);
+            }}
+            className="px-3 py-1 bg-gradient-to-r from-gray-600 to-gray-700 text-yellow-400 rounded-full hover:from-gray-500 hover:to-gray-600 transition-all shadow-sm hover:shadow-md flex items-center text-sm disabled:opacity-50"
+            disabled={!product.inStock}
+          >
+            <FaCalendarPlus className="mr-1" size={14} /> Add to Event
+          </button>
+        </div>
+      </motion.div>
+    );
   }
+);
 
-  const data = await response.json();
-  return data.secure_url; // Return the secure URL of the uploaded image
-};
-
-function Business() {
+function Businesses() {
   const { currentUser } = useAuth();
   const navigate = useNavigate();
-  const [businessId, setBusinessId] = useState<string | null>(null);
-  const [name, setName] = useState<string>('');
-  const [category, setCategory] = useState<Category>('Refreshments');
-  const [description, setDescription] = useState<string>('');
-  const [products, setProducts] = useState<Product[]>([]);
-  const [newProduct, setNewProduct] = useState<Product>({
-    name: '',
-    description: '',
-    inStock: true,
-  });
-  const [loading, setLoading] = useState<boolean>(true);
+  const [businesses, setBusinesses] = useState<Business[]>([]);
+  const [allProducts, setAllProducts] = useState<Product[]>([]);
+  const [filteredProducts, setFilteredProducts] = useState<Product[]>([]);
+  const [events, setEvents] = useState<Event[]>([]);
+  const [loadingBusinesses, setLoadingBusinesses] = useState<boolean>(true);
+  const [loadingEvents, setLoadingEvents] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<ProductFilter>({ showInStockOnly: false, sortBy: 'name' });
-  const [formErrors, setFormErrors] = useState<FormErrors>({
-    name: '',
-    category: '',
-    description: '',
-    productName: '',
-    productDescription: '',
-  });
+  const [showAddToEventModal, setShowAddToEventModal] = useState(false);
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+  const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [showMenu, setShowMenu] = useState<number | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState('All');
+  const productsPerPage = 6;
 
-  // Fetch the user's business directly from Firestore
-  const fetchBusiness = useCallback(async () => {
+  // Fetch all businesses and user events in parallel
+  useEffect(() => {
     if (!currentUser) {
       navigate('/login');
       return;
     }
 
-    setLoading(true);
-    setError(null);
-    try {
-      const q = query(collection(db, 'businesses'), where('ownerId', '==', currentUser.uid));
-      const querySnapshot = await getDocs(q);
-      if (!querySnapshot.empty) {
-        const userBusiness = { id: querySnapshot.docs[0].id, ...querySnapshot.docs[0].data() } as Business;
-        setBusinessId(userBusiness.id);
-        setName(userBusiness.name || '');
-        setCategory(userBusiness.category as Category);
-        setDescription(userBusiness.description || '');
-        setProducts(userBusiness.products || []);
+    const fetchInitialData = async () => {
+      try {
+        // Fetch all businesses using the getBusinesses function from firebase.ts
+        const businessesData = await getBusinesses();
+        const mappedBusinesses = businessesData.map((business) => ({
+          id: business.id,
+          name: business.name,
+          products: business.products || [],
+          ownerId: business.ownerId,
+          category: business.category || 'Venue Provider', // Ensure category is included
+        })) as Business[];
+
+        // Flatten products from all businesses and add businessId to each product
+        const productsWithBusinessId = mappedBusinesses.flatMap((business) =>
+          (business.products || []).map((product: Product) => ({
+            ...product,
+            businessId: business.id,
+          }))
+        );
+        setBusinesses(mappedBusinesses);
+        setAllProducts(productsWithBusinessId);
+        setFilteredProducts(productsWithBusinessId); // Initialize filtered products
+        setLoadingBusinesses(false);
+
+        // Fetch user's events with a limit of 10
+        const eventsQuery = query(
+          collection(db, 'events'),
+          where('ownerId', '==', currentUser.uid),
+          limit(10)
+        );
+        const eventsSnapshot = await getDocs(eventsQuery);
+        const eventsData = eventsSnapshot.docs.map((doc) => ({
+          id: doc.id,
+          ...doc.data(),
+        })) as Event[];
+        setEvents(eventsData);
+        setLoadingEvents(false);
+
+        // Set up real-time listener for businesses
+        const businessesQuery = query(collection(db, 'businesses'));
+        const unsubscribeBusinesses = onSnapshot(businessesQuery, (snapshot) => {
+          const updatedBusinesses = snapshot.docs.map((doc) => ({
+            id: doc.id,
+            name: doc.data().name || 'Unnamed Business',
+            products: doc.data().products || [],
+            ownerId: doc.data().ownerId || 'unknown',
+            category: doc.data().category || 'Venue Provider',
+          })) as Business[];
+          const updatedProducts = updatedBusinesses.flatMap((business) =>
+            (business.products || []).map((product: Product) => ({
+              ...product,
+              businessId: business.id,
+            }))
+          );
+          setBusinesses(updatedBusinesses);
+          setAllProducts(updatedProducts);
+          // Reapply filters after update
+          handleFilterChange(searchQuery, categoryFilter, updatedProducts, updatedBusinesses);
+        }, (err) => {
+          console.error('Error listening to businesses updates:', err);
+          toast.error('Failed to listen to businesses updates: ' + err.message);
+        });
+
+        // Set up real-time listener for events
+        const unsubscribeEvents = onSnapshot(eventsQuery, (snapshot) => {
+          const updatedEvents = snapshot.docs.map((doc) => ({
+            id: doc.id,
+            ...doc.data(),
+          })) as Event[];
+          setEvents(updatedEvents);
+        }, (err) => {
+          console.error('Error listening to events updates:', err);
+          toast.error('Failed to listen to events updates: ' + err.message);
+        });
+
+        // Cleanup listeners on unmount
+        return () => {
+          unsubscribeBusinesses();
+          unsubscribeEvents();
+        };
+      } catch (err: any) {
+        console.error('Error fetching initial data:', err);
+        setError('Failed to load data. Please try again.');
+        toast.error('Failed to load data: ' + err.message);
+        setLoadingBusinesses(false);
+        setLoadingEvents(false);
       }
-    } catch (err: any) {
-      setError('Failed to load business. Please try again.');
-      toast.error('Failed to load business: ' + err.message);
-    } finally {
-      setLoading(false);
-    }
+    };
+
+    fetchInitialData();
   }, [currentUser, navigate]);
 
-  useEffect(() => {
-    fetchBusiness();
-  }, [fetchBusiness]);
-
-  // Debounced input handlers
-  const debouncedSetName = useCallback(
-    debounce((value: string) => {
-      setName(value);
-      setFormErrors((prev) => ({ ...prev, name: value.trim() ? '' : 'Business name is required' }));
-    }, 300),
-    []
-  );
-
-  const debouncedSetDescription = useCallback(
-    debounce((value: string) => {
-      setDescription(value);
-      setFormErrors((prev) => ({ ...prev, description: value.trim() ? '' : 'Description is required' }));
-    }, 300),
-    []
-  );
-
-  const debouncedSetNewProductName = useCallback(
-    debounce((value: string) => {
-      setNewProduct((prev) => ({ ...prev, name: value }));
-      setFormErrors((prev) => ({ ...prev, productName: value.trim() ? '' : 'Product name is required' }));
-    }, 300),
-    []
-  );
-
-  const debouncedSetNewProductDescription = useCallback(
-    debounce((value: string) => {
-      setNewProduct((prev) => ({ ...prev, description: value }));
-      setFormErrors((prev) => ({ ...prev, productDescription: value.trim() ? '' : 'Product description is required' }));
-    }, 300),
-    []
-  );
-
-  const validateBusinessForm = () => {
-    const errors = { ...formErrors };
-    let isValid = true;
-
-    if (!name.trim()) {
-      errors.name = 'Business name is required';
-      isValid = false;
+  // Handle filtering of products
+  const handleFilterChange = (
+    search: string,
+    category: string,
+    products: Product[] = allProducts,
+    businessList: Business[] = businesses
+  ) => {
+    let filtered = products;
+    if (search) {
+      filtered = filtered.filter((product) => {
+        const business = businessList.find((b) => b.id === product.businessId);
+        return business?.name.toLowerCase().includes(search.toLowerCase()) || product.name.toLowerCase().includes(search.toLowerCase());
+      });
     }
-    if (!category) {
-      errors.category = 'Category is required';
-      isValid = false;
+    if (category !== 'All') {
+      filtered = filtered.filter((product) => {
+        const business = businessList.find((b) => b.id === product.businessId);
+        return business?.category === category;
+      });
     }
-    if (!description.trim()) {
-      errors.description = 'Description is required';
-      isValid = false;
-    }
-
-    setFormErrors(errors);
-    return isValid;
+    setFilteredProducts(filtered);
+    setCurrentPage(1);
   };
 
-  const validateProductForm = () => {
-    const errors = { ...formErrors };
-    let isValid = true;
+  // Handle adding a product to an event
+  const handleAddToEvent = useCallback(async () => {
+    if (!selectedProduct || !selectedEvent) return;
 
-    if (!newProduct.name.trim()) {
-      errors.productName = 'Product name is required';
-      isValid = false;
-    }
-    if (!newProduct.description.trim()) {
-      errors.productDescription = 'Product description is required';
-      isValid = false;
-    }
-
-    setFormErrors(errors);
-    return isValid;
-  };
-
-  const handleSaveBusiness = async () => {
-    if (!currentUser) return;
-
-    if (!validateBusinessForm()) {
-      toast.error('Please fill in all required fields.');
-      return;
-    }
-
-    setLoading(true);
     try {
-      const businessData = {
-        name,
-        category,
-        description,
-        ownerId: currentUser.uid,
-        products,
+      // Update event with the new product
+      const eventRef = doc(db, 'events', selectedEvent.id);
+      const updatedProducts = [
+        ...(selectedEvent.products || []),
+        { name: selectedProduct.name, businessId: selectedProduct.businessId },
+      ];
+      await updateDoc(eventRef, { products: updatedProducts });
+
+      // Send notification to the business
+      const notification: Notification = {
+        businessId: selectedProduct.businessId,
+        productName: selectedProduct.name,
+        eventId: selectedEvent.id,
+        eventTitle: selectedEvent.title,
+        timestamp: new Date().toISOString(),
+        read: false,
       };
-      if (businessId) {
-        await updateDoc(doc(db, 'businesses', businessId), businessData);
-        toast.success('Business updated!');
-      } else {
-        const docRef = await addDoc(collection(db, 'businesses'), businessData);
-        setBusinessId(docRef.id);
-        toast.success('Business created!');
-      }
-      navigate('/business-profile');
+      await addDoc(collection(db, 'notifications'), notification);
+
+      toast.success(`${selectedProduct.name} added to ${selectedEvent.title}!`);
+      setShowConfirmModal(false);
+      setShowAddToEventModal(false);
+      setSelectedProduct(null);
+      setSelectedEvent(null);
     } catch (err: any) {
-      toast.error('Failed to save business: ' + err.message);
-    } finally {
-      setLoading(false);
+      console.error('Error adding product to event:', err);
+      toast.error('Failed to add product to event: ' + err.message);
     }
-  };
+  }, [selectedProduct, selectedEvent]);
 
-  const handleAddProduct = async () => {
-    if (!validateProductForm()) {
-      toast.error('Please fill in all required product fields.');
-      return;
-    }
+  // Pagination logic
+  const indexOfLastProduct = currentPage * productsPerPage;
+  const indexOfFirstProduct = indexOfLastProduct - productsPerPage;
+  const currentProducts = filteredProducts.slice(indexOfFirstProduct, indexOfLastProduct);
+  const totalPages = Math.ceil(filteredProducts.length / productsPerPage);
 
-    setLoading(true);
-    try {
-      let imageUrl = newProduct.imageUrl;
-      if (newProduct.file) {
-        // Upload image to Cloudinary
-        imageUrl = await uploadImageToCloudinary(newProduct.file);
-      }
-      const updatedProduct = { ...newProduct, imageUrl, file: undefined };
-      const updatedProducts = [...products, updatedProduct];
-      setProducts(updatedProducts);
-      setNewProduct({ name: '', description: '', inStock: true });
-      if (businessId) {
-        await updateDoc(doc(db, 'businesses', businessId), { products: updatedProducts });
-      }
-      toast.success('Product added!');
-    } catch (err: any) {
-      toast.error('Failed to add product: ' + err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleDeleteProduct = async (index: number) => {
-    if (!businessId) return;
-    const updatedProducts = products.filter((_, i) => i !== index);
-    setProducts(updatedProducts);
-    try {
-      await updateDoc(doc(db, 'businesses', businessId), { products: updatedProducts });
-      toast.success('Product deleted!');
-    } catch (err: any) {
-      toast.error('Failed to delete product: ' + err.message);
-    }
-  };
-
-  const handleCancelAddProduct = () => {
-    setNewProduct({ name: '', description: '', inStock: true });
-    setFormErrors((prev) => ({ ...prev, productName: '', productDescription: '' }));
-  };
-
-  const handleFilterChange = (showInStockOnly: boolean) => {
-    setFilter((prev) => ({ ...prev, showInStockOnly }));
-  };
-
-  const handleSortChange = (sortBy: 'name' | 'stock') => {
-    setFilter((prev) => ({ ...prev, sortBy }));
-  };
-
-  const fadeIn = { hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 0, transition: { duration: 0.6 } } };
   const stagger = { visible: { transition: { staggerChildren: 0.1 } } };
 
-  // Memoized product list with filtering and sorting
-  const filteredProducts = useMemo(() => {
-    let productList = [...products];
+  // Unique categories for the filter dropdown
+  const categoryOptions = ['All', ...new Set(businesses.map((business) => business.category))];
 
-    // Apply filter
-    if (filter.showInStockOnly) {
-      productList = productList.filter((product) => product.inStock);
-    }
-
-    // Apply sorting
-    if (filter.sortBy === 'name') {
-      productList.sort((a, b) => a.name.localeCompare(b.name));
-    } else if (filter.sortBy === 'stock') {
-      productList.sort((a, b) => (a.inStock === b.inStock ? 0 : a.inStock ? -1 : 1));
-    }
-
-    return productList;
-  }, [products, filter]);
-
-  if (loading) {
+  if (error) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-gray-900 to-gray-800 flex items-center justify-center">
-        <div className="w-full max-w-4xl p-4 space-y-4">
-          <div className="h-8 bg-gray-700 rounded w-3/5 mx-auto animate-pulse"></div>
-          <div className="h-24 bg-gray-700 rounded animate-pulse"></div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {[...Array(4)].map((_, idx) => (
-              <div key={idx} className="h-48 bg-gray-700 rounded animate-pulse"></div>
-            ))}
-          </div>
+        <div className="bg-red-500 text-white p-4 rounded-lg flex items-center gap-3">
+          <p>{error}</p>
+          <button
+            onClick={() => window.location.reload()}
+            className="px-4 py-2 bg-white text-red-500 rounded-full hover:bg-gray-200 transition-colors"
+            aria-label="Retry loading businesses"
+          >
+            <FaSpinner size={16} /> Retry
+          </button>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-900 to-gray-800 py-12 px-4 sm:px-6 lg:px-8">
+    <div className="min-h-screen bg-gradient-to-br from-gray-900 to-gray-800 py-8 px-4 sm:px-6 lg:px-8 text-white">
       <motion.div
-        className="max-w-4xl mx-auto bg-gray-800 rounded-xl shadow-2xl overflow-hidden"
+        className="max-w-5xl mx-auto bg-gray-800/70 backdrop-blur-lg rounded-2xl shadow-2xl overflow-hidden border border-gray-700/30"
         initial="hidden"
         animate="visible"
         variants={stagger}
       >
-        {/* Hero Section */}
-        <div className="relative h-48">
-          <div className="absolute inset-0 bg-gradient-to-r from-yellow-500 to-yellow-300 opacity-80"></div>
-          <h1 className="absolute bottom-4 left-6 text-3xl font-bold text-white">
-            {businessId ? 'Manage Your Business' : 'Create a Business'}
-          </h1>
-        </div>
-
-        {/* Business Form */}
-        <motion.div className="p-6 space-y-6" variants={fadeIn}>
-          <div>
-            <label htmlFor="nameInput" className="block text-sm text-gray-400 mb-1">
-              Business Name <span className="text-red-500">*</span>
-            </label>
-            <input
-              id="nameInput"
-              value={name}
-              onChange={(e) => debouncedSetName(e.target.value)}
-              className={`w-full p-3 rounded bg-gray-700 text-gray-200 focus:outline-none focus:ring-2 focus:ring-yellow-400 ${formErrors.name ? 'border-red-500 border' : ''}`}
-              placeholder="Enter business name"
-              disabled={loading}
-              aria-invalid={formErrors.name ? "true" : "false"}
-              aria-describedby={formErrors.name ? 'name-error' : undefined}
-            />
-            {formErrors.name && (
-              <p id="name-error" className="text-red-500 text-sm mt-1">
-                {formErrors.name}
-              </p>
-            )}
-          </div>
-          <div>
-            <label htmlFor="categorySelect" className="block text-sm text-gray-400 mb-1">
-              Category <span className="text-red-500">*</span>
-            </label>
-            <select
-              id="categorySelect"
-              value={category}
-              onChange={(e) => {
-                setCategory(e.target.value as Category);
-                setFormErrors((prev) => ({ ...prev, category: e.target.value ? '' : 'Category is required' }));
-              }}
-              className={`w-full p-3 rounded bg-gray-700 text-gray-200 focus:outline-none focus:ring-2 focus:ring-yellow-400 ${formErrors.category ? 'border-red-500 border' : ''}`}
-              disabled={loading}
-              aria-invalid={formErrors.category ? "true" : "false"}
-              aria-describedby={formErrors.category ? 'category-error' : undefined}
-            >
-              <option value="">Select a category</option>
-              <option value="Refreshments">Refreshments</option>
-              <option value="Catering/Food">Catering/Food</option>
-              <option value="Venue Provider">Venue Provider</option>
-            </select>
-            {formErrors.category && (
-              <p id="category-error" className="text-red-500 text-sm mt-1">
-                {formErrors.category}
-              </p>
-            )}
-          </div>
-          <div>
-            <label htmlFor="descriptionTextarea" className="block text-sm text-gray-400 mb-1">
-              Description <span className="text-red-500">*</span>
-            </label>
-            <textarea
-              id="descriptionTextarea"
-              value={description}
-              onChange={(e) => debouncedSetDescription(e.target.value)}
-              className={`w-full p-3 rounded bg-gray-700 text-gray-200 focus:outline-none focus:ring-2 focus:ring-yellow-400 ${formErrors.description ? 'border-red-500 border' : ''}`}
-              rows={4}
-              placeholder="Describe your business"
-              disabled={loading}
-              aria-invalid={formErrors.description ? "true" : "false"}
-              aria-describedby={formErrors.description ? 'description-error' : undefined}
-            />
-            {formErrors.description && (
-              <p id="description-error" className="text-red-500 text-sm mt-1">
-                {formErrors.description}
-              </p>
-            )}
-          </div>
-          <button
-            onClick={handleSaveBusiness}
-            className="w-full p-3 bg-yellow-500 text-gray-900 rounded hover:bg-yellow-600 flex items-center justify-center disabled:opacity-50 transition-colors"
-            disabled={loading}
-            aria-label={businessId ? 'Update Business' : 'Create Business'}
-          >
-            <FaSave className="mr-2" />
-            {businessId ? 'Update Business' : 'Create Business'}
-          </button>
-        </motion.div>
-
-        {/* Products Section */}
-        <motion.div className="p-6" variants={fadeIn}>
-          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-4">
-            <h2 className="text-xl font-semibold text-yellow-400">Products</h2>
-            <div className="flex gap-3">
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => handleFilterChange(!filter.showInStockOnly)}
-                  className={`flex items-center gap-2 px-3 py-1 rounded-full ${filter.showInStockOnly ? 'bg-yellow-500 text-gray-900' : 'bg-gray-700 text-gray-200'} hover:bg-yellow-400 transition-colors`}
-                  aria-label={filter.showInStockOnly ? 'Show All Products' : 'Show In-Stock Only'}
-                >
-                  <FaFilter size={16} />
-                  {filter.showInStockOnly ? 'All' : 'In Stock'}
-                </button>
-                <select
-                  value={filter.sortBy}
-                  onChange={(e) => handleSortChange(e.target.value as 'name' | 'stock')}
-                  className="p-1 bg-gray-700 text-gray-200 rounded focus:outline-none focus:ring-2 focus:ring-yellow-400"
-                  aria-label="Sort Products"
-                >
-                  <option value="name">Sort by Name</option>
-                  <option value="stock">Sort by Stock</option>
-                </select>
-              </div>
-            </div>
-          </div>
-          {filteredProducts.length > 0 ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 mb-6">
-              {filteredProducts.map((product, idx) => (
-                <motion.div
-                  key={idx}
-                  className="bg-gray-700 p-4 rounded-lg shadow-lg hover:shadow-xl transition-shadow relative"
-                  initial={{ opacity: 0, scale: 0.95 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  transition={{ duration: 0.3 }}
-                >
-                  {product.imageUrl ? (
-                    <LazyImage
-                      src={product.imageUrl}
-                      alt={product.name}
-                      className="w-full h-32 object-cover rounded mb-3"
-                    />
-                  ) : (
-                    <div className="w-full h-32 bg-gray-600 rounded mb-3 flex items-center justify-center">
-                      <span className="text-gray-400">No Image</span>
-                    </div>
-                  )}
-                  <h3 className="text-lg font-semibold text-yellow-400">{product.name}</h3>
-                  <p className="text-gray-400 text-sm line-clamp-2">{product.description}</p>
-                  <p className="text-sm mt-2 flex items-center gap-1">
-                    {product.inStock ? (
-                      <FaCheckCircle className="text-green-500" />
-                    ) : (
-                      <FaTimesCircle className="text-red-500" />
-                    )}
-                    <span className="text-gray-400">
-                      {product.inStock ? 'In Stock' : 'Out of Stock'}
-                    </span>
-                  </p>
-                  <button
-                    onClick={() => handleDeleteProduct(idx)}
-                    className="absolute top-2 right-2 text-red-500 hover:text-red-400 transition-colors"
-                    aria-label={`Delete ${product.name}`}
-                    disabled={loading}
-                  >
-                    <FaTrash size={16} />
-                  </button>
-                </motion.div>
-              ))}
-            </div>
+        <div className="p-6 sm:p-8">
+          {loadingBusinesses ? (
+            <div className="h-8 bg-gray-700 rounded w-3/5 mx-auto animate-pulse mb-8"></div>
           ) : (
-            <p className="text-gray-400 text-center py-6">No products added yet.</p>
+            <h1 className="text-3xl sm:text-4xl font-bold text-yellow-400 mb-8">All Products</h1>
           )}
 
-          {/* Add New Product Form */}
-          <h3 className="text-lg font-semibold text-yellow-400 mt-6 mb-4">Add New Product</h3>
-          <div className="space-y-4 bg-gray-700 p-4 rounded-lg">
-            <div>
-              <label htmlFor="productNameInput" className="block text-sm text-gray-400 mb-1">
-                Product Name <span className="text-red-500">*</span>
-              </label>
+          {/* Filter Section */}
+          <div className="mb-8 flex flex-col sm:flex-row items-start sm:items-center gap-4">
+            <div className="flex items-center w-full sm:w-auto">
+              <FaSearch className="text-yellow-400 mr-3" size={20} />
               <input
-                id="productNameInput"
-                value={newProduct.name}
-                onChange={(e) => debouncedSetNewProductName(e.target.value)}
-                className={`w-full p-3 rounded bg-gray-600 text-gray-200 focus:outline-none focus:ring-2 focus:ring-yellow-400 ${formErrors.productName ? 'border-red-500 border' : ''}`}
-                placeholder="Enter product name"
-                disabled={loading}
-                aria-invalid={formErrors.productName ? "true" : "false"}
-                aria-describedby={formErrors.productName ? 'product-name-error' : undefined}
-              />
-              {formErrors.productName && (
-                <p id="product-name-error" className="text-red-500 text-sm mt-1">
-                  {formErrors.productName}
-                </p>
-              )}
-            </div>
-            <div>
-              <label htmlFor="productDescriptionTextarea" className="block text-sm text-gray-400 mb-1">
-                Product Description <span className="text-red-500">*</span>
-              </label>
-              <textarea
-                id="productDescriptionTextarea"
-                value={newProduct.description}
-                onChange={(e) => debouncedSetNewProductDescription(e.target.value)}
-                className={`w-full p-3 rounded bg-gray-600 text-gray-200 focus:outline-none focus:ring-2 focus:ring-yellow-400 ${formErrors.productDescription ? 'border-red-500 border' : ''}`}
-                rows={2}
-                placeholder="Describe the product"
-                disabled={loading}
-                aria-invalid={formErrors.productDescription ? "true" : "false"}
-                aria-describedby={formErrors.productDescription ? 'product-description-error' : undefined}
-              />
-              {formErrors.productDescription && (
-                <p id="product-description-error" className="text-red-500 text-sm mt-1">
-                  {formErrors.productDescription}
-                </p>
-              )}
-            </div>
-            <div>
-              <label htmlFor="productImageInput" className="block text-sm text-gray-400 mb-1">
-                Product Image
-              </label>
-              <input
-                id="productImageInput"
-                type="file"
-                accept="image/*"
-                onChange={(e) => setNewProduct({ ...newProduct, file: e.target.files?.[0] || undefined })}
-                className="w-full p-3 text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:bg-yellow-400 file:text-gray-900"
-                disabled={loading}
+                type="text"
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  handleFilterChange(e.target.value, categoryFilter);
+                }}
+                placeholder="Search products or businesses..."
+                className="w-full sm:w-64 px-4 py-3 rounded-lg bg-gray-700/50 text-gray-200 border border-gray-600/50 focus:outline-none focus:ring-2 focus:ring-yellow-400 placeholder-gray-400 transition-all duration-300"
               />
             </div>
-            <div className="flex items-center">
-              <input
-                type="checkbox"
-                checked={newProduct.inStock}
-                onChange={(e) => setNewProduct({ ...newProduct, inStock: e.target.checked })}
-                className="mr-2 accent-yellow-400"
-                id="inStockCheckbox"
-                disabled={loading}
-              />
-              <label htmlFor="inStockCheckbox" className="text-gray-400">
-                In Stock
-              </label>
-            </div>
-            <div className="flex gap-3">
-              <button
-                onClick={handleAddProduct}
-                className="flex-1 p-3 bg-green-500 text-white rounded hover:bg-green-600 flex items-center justify-center disabled:opacity-50 transition-colors"
-                disabled={loading}
-                aria-label="Add Product"
+            <div className="flex items-center w-full sm:w-auto">
+              <FaFilter className="text-yellow-400 mr-3" size={20} />
+              <select
+                value={categoryFilter}
+                onChange={(e) => {
+                  setCategoryFilter(e.target.value);
+                  handleFilterChange(searchQuery, e.target.value);
+                }}
+                className="w-full sm:w-48 px-4 py-3 rounded-lg bg-gray-700/50 text-gray-200 border border-gray-600/50 focus:outline-none focus:ring-2 focus:ring-yellow-400 transition-all duration-300"
               >
-                <FaPlus className="mr-2" />
-                Add Product
-              </button>
-              <button
-                onClick={handleCancelAddProduct}
-                className="flex-1 p-3 bg-red-500 text-white rounded hover:bg-red-600 flex items-center justify-center disabled:opacity-50 transition-colors"
-                disabled={loading}
-                aria-label="Cancel Adding Product"
-              >
-                <FaTimes className="mr-2" />
-                Cancel
-              </button>
+                {categoryOptions.map((category) => (
+                  <option key={category} value={category}>
+                    {category}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
-        </motion.div>
 
-        {/* Error State with Retry */}
-        {error && (
-          <motion.div className="m-6 p-4 bg-red-500 text-white rounded-lg flex justify-center items-center gap-3" variants={fadeIn}>
-            <p>{error}</p>
-            <button
-              onClick={fetchBusiness}
-              className="flex items-center gap-2 px-4 py-2 bg-white text-red-500 rounded-full hover:bg-gray-200 transition-colors"
-              aria-label="Retry loading business data"
-            >
-              <FaRedo size={16} /> Retry
-            </button>
-          </motion.div>
-        )}
+          {loadingBusinesses ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+              {[...Array(productsPerPage)].map((_, idx) => (
+                <div key={idx} className="h-64 bg-gray-700 rounded-xl animate-pulse"></div>
+              ))}
+            </div>
+          ) : filteredProducts.length > 0 ? (
+            <>
+              <motion.div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6" variants={stagger}>
+                {currentProducts.map((product, index) => (
+                  <ProductCard
+                    key={index}
+                    product={product}
+                    index={index}
+                    businesses={businesses}
+                    setSelectedProduct={setSelectedProduct}
+                    setShowAddToEventModal={setShowAddToEventModal}
+                    showMenu={showMenu}
+                    setShowMenu={setShowMenu}
+                    navigate={navigate}
+                  />
+                ))}
+              </motion.div>
+              {/* Pagination Controls */}
+              {totalPages > 1 && (
+                <div className="flex justify-center mt-6 space-x-2">
+                  <button
+                    onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 1))}
+                    disabled={currentPage === 1}
+                    className="px-4 py-2 bg-gray-600 text-white rounded-full hover:bg-gray-500 disabled:opacity-50 transition-colors"
+                  >
+                    Previous
+                  </button>
+                  <span className="px-4 py-2 text-gray-300">
+                    Page {currentPage} of {totalPages}
+                  </span>
+                  <button
+                    onClick={() => setCurrentPage((prev) => Math.min(prev + 1, totalPages))}
+                    disabled={currentPage === totalPages}
+                    className="px-4 py-2 bg-gray-600 text-white rounded-full hover:bg-gray-500 disabled:opacity-50 transition-colors"
+                  >
+                    Next
+                  </button>
+                </div>
+              )}
+            </>
+          ) : (
+            <p className="text-gray-400 text-center text-lg">
+              No products found matching your criteria.
+            </p>
+          )}
+        </div>
       </motion.div>
+
+      {/* Add to Event Modal */}
+      {showAddToEventModal && selectedProduct && (
+        <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 p-4">
+          <motion.div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-gray-800/90 backdrop-blur-md rounded-2xl max-w-md w-full p-6 sm:p-8 relative border border-gray-700/30 shadow-2xl"
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+          >
+            <button
+              onClick={() => {
+                setShowAddToEventModal(false);
+                setSelectedProduct(null);
+                setSelectedEvent(null);
+              }}
+              className="absolute top-4 right-4 text-gray-400 hover:text-gray-200 transition-colors"
+              aria-label="Close modal"
+            >
+              <FaTrash size={20} />
+            </button>
+            <h3 className="text-xl sm:text-2xl font-bold text-yellow-400 mb-6">
+              Add {selectedProduct.name} to Event
+            </h3>
+            {loadingEvents ? (
+              <div className="text-gray-400 text-center">Loading events...</div>
+            ) : events.length > 0 ? (
+              <div className="space-y-4">
+                <label htmlFor="event-select" className="block text-sm font-medium text-gray-300">
+                  Select an Event
+                </label>
+                <select
+                  id="event-select"
+                  value={selectedEvent?.id || ''}
+                  onChange={(e) => {
+                    const event = events.find((ev) => ev.id === e.target.value);
+                    setSelectedEvent(event || null);
+                  }}
+                  className="w-full px-4 py-2 sm:py-3 rounded-lg bg-gray-700/50 text-gray-200 border border-gray-600/50 focus:outline-none focus:ring-2 focus:ring-yellow-400 transition-all duration-300 text-sm sm:text-base"
+                >
+                  <option value="">Select an event</option>
+                  {events.map((event) => (
+                    <option key={event.id} value={event.id}>
+                      {event.title} ({new Date(event.date).toLocaleDateString()})
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={() => setShowConfirmModal(true)}
+                  className="w-full px-4 py-2 sm:py-3 bg-gradient-to-r from-yellow-400 to-yellow-500 text-gray-900 rounded-lg hover:from-yellow-300 hover:to-yellow-400 transition-all font-semibold shadow-sm hover:shadow-md disabled:opacity-50"
+                  disabled={!selectedEvent}
+                >
+                  <FaPlus className="inline mr-2" /> Add to Event
+                </button>
+              </div>
+            ) : (
+              <p className="text-gray-400 text-center">
+                No events found. Create an event first.
+              </p>
+            )}
+          </motion.div>
+        </div>
+      )}
+
+      {/* Confirmation Modal */}
+      {showConfirmModal && selectedProduct && selectedEvent && (
+        <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 p-4">
+          <motion.div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-gray-800/90 backdrop-blur-md rounded-2xl max-w-md w-full p-6 sm:p-8 relative border border-gray-700/30 shadow-2xl"
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+          >
+            <h3 className="text-xl sm:text-2xl font-bold text-yellow-400 mb-4">
+              Confirm Addition
+            </h3>
+            <p className="text-gray-300 mb-6">
+              Are you sure you want to add <strong>{selectedProduct.name}</strong> to{' '}
+              <strong>{selectedEvent.title}</strong>?
+            </p>
+            <div className="flex space-x-3">
+              <button
+                onClick={handleAddToEvent}
+                className="w-full px-4 py-2 sm:py-3 bg-gradient-to-r from-yellow-400 to-yellow-500 text-gray-900 rounded-lg hover:from-yellow-300 hover:to-yellow-400 transition-all font-semibold shadow-sm hover:shadow-md"
+              >
+                Yes
+              </button>
+              <button
+                onClick={() => setShowConfirmModal(false)}
+                className="w-full px-4 py-2 sm:py-3 bg-gray-600/50 text-gray-200 rounded-lg hover:bg-gray-500/50 transition-all font-semibold shadow-sm hover:shadow-md"
+              >
+                No
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
     </div>
   );
 }
 
-export default Business;
+export default Businesses;

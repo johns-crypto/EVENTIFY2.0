@@ -1,3 +1,4 @@
+// src/services/eventCreation.ts
 import { useState, useEffect, useCallback } from 'react';
 import { doc, addDoc, collection, Timestamp } from 'firebase/firestore';
 import { db, getUserData, createGroupChat } from '../services/firebase';
@@ -41,7 +42,7 @@ export const multiStepCreateEvent = ({
     location: '',
     date: '',
     visibility: 'public',
-    organizers: [userId],
+    organizers: userId ? [userId] : [], // Initialize with userId if available
     inviteLink: '',
     description: '',
     selectedImage: null,
@@ -82,7 +83,11 @@ export const multiStepCreateEvent = ({
         onError(`Failed to fetch followers: ${err.message}`);
       }
     };
-    fetchFollowersAndNames();
+
+    // Only call fetchFollowersAndNames if userId is a non-empty string
+    if (userId) {
+      fetchFollowersAndNames();
+    }
   }, [userId, onError]);
 
   useEffect(() => {

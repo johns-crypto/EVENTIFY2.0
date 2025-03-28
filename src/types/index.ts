@@ -117,6 +117,7 @@ export interface UserData {
   followers: string[];
   following: string[];
   notificationsEnabled: boolean;
+  role: string; // Add role property
 }
 
 export interface ChatData {

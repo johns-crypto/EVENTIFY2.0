@@ -16,6 +16,8 @@ import {
   FaRss,
   FaBars,
   FaBuilding,
+  FaCog,
+  FaImage,
 } from 'react-icons/fa';
 import { MdBusiness } from 'react-icons/md';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -27,17 +29,19 @@ const ROUTES = {
   HOME: '/',
   FEED: '/feed',
   EVENTS: '/events',
-  BUSINESSES: '/businesses-page', 
-  BUSINESS_PROFILES: '/business-profile', 
+  BUSINESSES: '/businesses',
+  BUSINESS_PROFILES: '/business-profiles',
   NOTIFICATIONS: '/notifications',
   ABOUT: '/about',
   PROFILE: '/profile',
   SEARCH: '/search',
+  SETTINGS: '/settings',
+  MEDIA_EDITOR: '/media-editor',
 };
 
 // Interface for props
 interface SidebarProps {
-  children?: React.ReactNode;
+  children: React.ReactNode; // Add children prop
 }
 
 // NavLink Component
@@ -103,6 +107,7 @@ const MobileNavLink = ({
       aria-label={`${label}${notificationCount > 0 ? `, ${notificationCount} new notifications` : ''}`}
     >
       <Icon size={24} />
+      <span className="sr-only">{label}</span>
       {notificationCount > 0 && (
         <motion.span
           className="absolute top-1 right-1 bg-secondary-deepRed text-white text-xs rounded-full h-5 w-5 flex items-center justify-center"
@@ -154,6 +159,28 @@ const HamburgerMenuModal = ({
         >
           <FaInfoCircle size={16} className="text-accent-gold mr-3" />
           Updates & FAQs
+        </button>
+        <button
+          onClick={() => {
+            navigate(ROUTES.SETTINGS);
+            onClose();
+          }}
+          className="w-full flex items-center p-2 text-neutral-lightGray hover:bg-secondary-deepRed/50 rounded-lg focus:outline-none focus:ring-2 focus:ring-accent-gold"
+          aria-label="Go to Settings page"
+        >
+          <FaCog size={16} className="text-accent-gold mr-3" />
+          Settings
+        </button>
+        <button
+          onClick={() => {
+            navigate(ROUTES.MEDIA_EDITOR);
+            onClose();
+          }}
+          className="w-full flex items-center p-2 text-neutral-lightGray hover:bg-secondary-deepRed/50 rounded-lg focus:outline-none focus:ring-2 focus:ring-accent-gold"
+          aria-label="Go to Media Editor page"
+        >
+          <FaImage size={16} className="text-accent-gold mr-3" />
+          Media Editor
         </button>
         <button
           onClick={handleLogout}
@@ -269,6 +296,8 @@ function Sidebar({ children }: SidebarProps) {
         notificationCount,
       },
       { to: ROUTES.PROFILE, icon: FaUser, label: currentUser?.displayName || 'User' },
+      { to: ROUTES.SETTINGS, icon: FaCog, label: 'Settings' },
+      { to: ROUTES.MEDIA_EDITOR, icon: FaImage, label: 'Media Editor' },
     ],
     [notificationCount, currentUser]
   );
@@ -364,7 +393,7 @@ function Sidebar({ children }: SidebarProps) {
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="Search users & events..."
-                  className="w-full p-2 rounded-lg bg-neutral-mediumGray text-neutral-lightGray border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold shadow-md text-sm"
+                  className="w-full p-2 rounded-lg bg-neutral-mediumGray text-gray-900 border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold shadow-md text-sm placeholder-gray-500"
                   autoFocus
                 />
               </motion.form>
@@ -460,7 +489,7 @@ function Sidebar({ children }: SidebarProps) {
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="Search users & events..."
-                  className="w-full p-2 rounded-lg bg-neutral-mediumGray text-neutral-lightGray border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold shadow-md text-sm"
+                  className="w-full p-2 rounded-lg bg-neutral-mediumGray text-gray-900 border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold shadow-md text-sm placeholder-gray-500"
                   autoFocus
                 />
               </form>
@@ -485,10 +514,9 @@ function Sidebar({ children }: SidebarProps) {
       <div
         className={`flex-1 overflow-y-auto p-6 pt-4 transition-all duration-300 md:pt-4 ${
           isExpanded ? 'md:pl-80' : 'md:pl-20'
-        } pb-20 md:pb-6`} // Increased padding-bottom for mobile footer
+        } pb-20 md:pb-6`}
       >
-        {children}
-        <Outlet />
+        {children} {/* Render the Routes passed as children */}
       </div>
     </div>
   );

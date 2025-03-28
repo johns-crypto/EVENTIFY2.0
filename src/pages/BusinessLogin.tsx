@@ -1,14 +1,15 @@
-// src/pages/Login.tsx
-import { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+// src/pages/BusinessLogin.tsx
+import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { sendPasswordResetEmail, GoogleAuthProvider, FacebookAuthProvider, signInWithPopup } from 'firebase/auth';
-import { auth } from '../services/firebase';
+import { sendPasswordResetEmail, GoogleAuthProvider, FacebookAuthProvider, signInWithRedirect, getRedirectResult } from 'firebase/auth';
+import { auth, db } from '../services/firebase';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { toast } from 'react-toastify';
-import { FaEnvelope, FaLock, FaGoogle, FaFacebook, FaEye, FaEyeSlash } from 'react-icons/fa';
+import { FaEnvelope, FaLock, FaGoogle, FaFacebook, FaEye, FaEyeSlash, FaTimes } from 'react-icons/fa';
 
-function Login() {
-  const { login, userRole } = useAuth();
+function BusinessLogin() {
+  const { login, currentUser } = useAuth();
   const navigate = useNavigate();
 
   const [formData, setFormData] = useState({ email: '', password: '' });
@@ -16,6 +17,83 @@ function Login() {
   const [loading, setLoading] = useState(false);
   const [resetSent, setResetSent] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [isOpen, setIsOpen] = useState(true);
+
+  useEffect(() => {
+    const handleRedirectResult = async () => {
+      try {
+        console.log('Checking for redirect result...');
+        const result = await getRedirectResult(auth);
+        if (result) {
+          console.log('Redirect result received:', result);
+          const user = result.user;
+          const userDoc = await getDoc(doc(db, 'users', user.uid));
+          if (!userDoc.exists()) {
+            console.log('Creating new user document for UID:', user.uid);
+            await setDoc(doc(db, 'users', user.uid), {
+              displayName: user.displayName || 'Anonymous',
+              email: user.email || '',
+              createdAt: new Date().toISOString(),
+              bio: '',
+              location: '',
+              photoURL: user.photoURL || '',
+              contactEmail: user.email || '',
+              contactPhone: '',
+              followers: [],
+              following: [],
+              notificationsEnabled: true,
+              role: 'serviceProvider',
+            });
+          } else {
+            console.log('User document already exists:', userDoc.data());
+            const userData = userDoc.data();
+            if (userData.role !== 'serviceProvider') {
+              throw new Error('This account is not registered as a service provider.');
+            }
+          }
+
+          const redirectUrl = localStorage.getItem('redirectAfterAuth');
+          console.log('Redirect URL from local storage:', redirectUrl);
+          if (redirectUrl) {
+            localStorage.removeItem('redirectAfterAuth');
+            navigate(redirectUrl);
+          } else {
+            navigate('/business-profiles');
+          }
+        } else {
+          console.log('No redirect result found.');
+        }
+      } catch (err: any) {
+        console.error('Error handling redirect result:', err);
+        let errorMessage = err.message || 'Failed to complete login. Please try again.';
+        if (err.message.includes('network')) {
+          errorMessage = 'Failed to connect to the authentication provider. Please disable ad blockers or privacy extensions and try again.';
+        }
+        setErrors((prev) => ({
+          ...prev,
+          general: errorMessage,
+        }));
+        toast.error(errorMessage);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    handleRedirectResult();
+  }, [navigate]);
+
+  useEffect(() => {
+    // If the user is already logged in and has the correct role, redirect them
+    if (currentUser) {
+      const checkUserRole = async () => {
+        const userDoc = await getDoc(doc(db, 'users', currentUser.uid));
+        if (userDoc.exists() && userDoc.data().role === 'serviceProvider') {
+          navigate('/business-profiles');
+        }
+      };
+      checkUserRole();
+    }
+  }, [currentUser, navigate]);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
@@ -55,11 +133,29 @@ function Login() {
     setErrors({ email: '', password: '', general: '' });
 
     try {
+      console.log('Logging in with email:', formData.email);
       await login(formData.email, formData.password);
-      navigate(userRole === 'serviceProvider' ? '/business-profiles' : '/events');
+      const user = auth.currentUser;
+      if (user) {
+        console.log('User authenticated, UID:', user.uid);
+        const userDoc = await getDoc(doc(db, 'users', user.uid));
+        if (userDoc.exists() && userDoc.data().role === 'serviceProvider') {
+          console.log('User role is serviceProvider, navigating to /business-profiles');
+          navigate('/business-profiles');
+        } else {
+          throw new Error('This account is not registered as a service provider.');
+        }
+      } else {
+        throw new Error('User not found after login.');
+      }
     } catch (err: any) {
-      setErrors((prev) => ({ ...prev, general: err.message || 'Login failed. Please check your credentials.' }));
-      toast.error('Login failed: ' + err.message);
+      console.error('Error during login:', err);
+      let errorMessage = err.message || 'Login failed. Please check your credentials.';
+      if (err.message.includes('network')) {
+        errorMessage = 'Failed to connect to the authentication provider. Please disable ad blockers or privacy extensions and try again.';
+      }
+      setErrors((prev) => ({ ...prev, general: errorMessage }));
+      toast.error(errorMessage);
     } finally {
       setLoading(false);
     }
@@ -72,13 +168,19 @@ function Login() {
     }
     setLoading(true);
     try {
+      console.log('Sending password reset email to:', formData.email);
       await sendPasswordResetEmail(auth, formData.email);
       setResetSent(true);
       setTimeout(() => setResetSent(false), 5000);
       toast.success('Password reset email sent! Check your inbox.');
     } catch (err: any) {
-      setErrors((prev) => ({ ...prev, general: err.message || 'Failed to send reset email.' }));
-      toast.error('Failed to send reset email: ' + err.message);
+      console.error('Error sending password reset email:', err);
+      let errorMessage = err.message || 'Failed to send reset email.';
+      if (err.message.includes('network')) {
+        errorMessage = 'Failed to send reset email. Please disable ad blockers or privacy extensions and try again.';
+      }
+      setErrors((prev) => ({ ...prev, general: errorMessage }));
+      toast.error(errorMessage);
     } finally {
       setLoading(false);
     }
@@ -87,27 +189,41 @@ function Login() {
   const handleSocialLogin = async (providerType: 'google' | 'facebook') => {
     setLoading(true);
     try {
+      console.log(`Initiating ${providerType} social login...`);
       const provider = providerType === 'google' ? new GoogleAuthProvider() : new FacebookAuthProvider();
-      await signInWithPopup(auth, provider);
-      navigate(userRole === 'serviceProvider' ? '/business-profiles' : '/events');
+      localStorage.setItem('redirectAfterAuth', '/business-profiles');
+      await signInWithRedirect(auth, provider);
     } catch (err: any) {
       console.error(`Error during ${providerType} login:`, err);
+      let errorMessage = err.message || `Failed to initiate login with ${providerType}. Please try again.`;
+      if (err.message.includes('network')) {
+        errorMessage = `Failed to connect to ${providerType}. Please disable ad blockers or privacy extensions and try again.`;
+      }
       setErrors((prev) => ({
         ...prev,
-        general:
-          err.message ||
-          `Failed to login with ${providerType}. Please disable any ad blockers or privacy extensions and try again.`,
+        general: errorMessage,
       }));
-      toast.error(
-        `Failed to login with ${providerType}. Please disable any ad blockers or privacy extensions and try again.`
-      );
+      toast.error(errorMessage);
       setLoading(false);
     }
   };
 
+  const closeModal = () => {
+    setIsOpen(false);
+    navigate('/');
+  };
+
+  if (!isOpen) return null;
+
   return (
-    <div className="min-h-screen flex items-center justify-center py-6 px-4 sm:px-6 lg:px-8 bg-gradient-to-br from-indigo-100 via-white to-blue-100">
+    <div className="fixed inset-0 flex items-center justify-center z-50 bg-black bg-opacity-50">
       <div className="w-full max-w-md bg-white p-6 sm:p-8 rounded-2xl shadow-2xl border border-gray-200 relative">
+        <button
+          onClick={closeModal}
+          className="absolute top-4 right-4 text-gray-600 hover:text-gray-800 focus:outline-none"
+        >
+          <FaTimes size={20} />
+        </button>
         {loading && (
           <div className="absolute inset-0 bg-gray-200 bg-opacity-50 flex items-center justify-center rounded-2xl">
             <svg
@@ -126,16 +242,16 @@ function Login() {
           </div>
         )}
         <h2 className="text-2xl sm:text-3xl font-bold text-center text-indigo-900 mb-3">
-          Welcome Back
+          Business Login
         </h2>
         <p className="text-center text-gray-600 mb-6 text-sm sm:text-base">
-          Login to Eventify and explore your events
+          Login to manage your business on Eventify
         </p>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label htmlFor="email" className="block text-sm font-medium text-gray-700">
-              Email Address
+              Business Email Address
             </label>
             <div className="relative mt-1">
               <FaEnvelope className="absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400" size={18} />
@@ -148,7 +264,7 @@ function Login() {
                 className={`w-full pl-12 pr-4 py-3 rounded-lg bg-gray-50 border ${
                   errors.email ? 'border-red-500' : 'border-gray-200'
                 } text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow-md`}
-                placeholder="you@example.com"
+                placeholder="business@example.com"
                 disabled={loading}
               />
             </div>
@@ -177,6 +293,7 @@ function Login() {
                 type="button"
                 onClick={() => setShowPassword(!showPassword)}
                 className="absolute right-4 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600 focus:outline-none"
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
               >
                 {showPassword ? <FaEyeSlash size={18} /> : <FaEye size={18} />}
               </button>
@@ -200,13 +317,6 @@ function Login() {
           </button>
         </form>
 
-        <div className="mt-4 text-center text-sm text-gray-600">
-          <p>
-            Note: If you have an ad blocker or privacy extension enabled, you may need to disable it to use Google or
-            Facebook login.
-          </p>
-        </div>
-
         <div className="mt-6 space-y-3">
           <button
             onClick={() => handleSocialLogin('google')}
@@ -228,12 +338,6 @@ function Login() {
 
         <div className="mt-6 text-center space-y-2">
           <p className="text-sm text-gray-600">
-            Don’t have an account?{' '}
-            <Link to="/register" className="text-indigo-600 hover:underline font-semibold">
-              Register
-            </Link>
-          </p>
-          <p className="text-sm text-gray-600">
             Forgot your password?{' '}
             <button
               onClick={handleResetPassword}
@@ -249,4 +353,4 @@ function Login() {
   );
 }
 
-export default Login;
+export default BusinessLogin;

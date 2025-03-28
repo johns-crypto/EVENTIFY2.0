@@ -1,7 +1,8 @@
+// src/pages/Home.tsx
 import { useState, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { useAuth } from '../context/AuthContext';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { onSnapshot, collection, query, where, updateDoc, doc, arrayUnion, Timestamp, addDoc } from 'firebase/firestore';
 import { toast } from 'react-toastify';
 import defaultEventImage from '../assets/default-event.jpg';
@@ -9,7 +10,7 @@ import { multiStepCreateEvent, MultiStepEventData } from '../services/eventCreat
 import { db, getUserData } from '../services/firebase';
 import { FaCheck, FaUser, FaTimes, FaPlus } from 'react-icons/fa';
 import debounce from 'lodash/debounce';
-import { NormalizedEventData } from '../types'; // Use NormalizedEventData
+import { NormalizedEventData } from '../types';
 
 interface UserData {
   displayName?: string;
@@ -29,7 +30,6 @@ interface NotificationData {
   status: 'pending' | 'approved' | 'denied';
 }
 
-// Utility function to convert Timestamp to string
 const convertTimestampToString = (value: string | Timestamp): string => {
   if (value instanceof Timestamp) {
     return value.toDate().toISOString();
@@ -38,8 +38,9 @@ const convertTimestampToString = (value: string | Timestamp): string => {
 };
 
 function Home() {
-  const { currentUser } = useAuth();
-  const [events, setEvents] = useState<NormalizedEventData[]>([]); // Use NormalizedEventData
+  const { currentUser, loading } = useAuth();
+  const navigate = useNavigate();
+  const [events, setEvents] = useState<NormalizedEventData[]>([]);
   const [username, setUsername] = useState('');
   const [loadingEvents, setLoadingEvents] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -47,6 +48,22 @@ function Home() {
   const [searchTerm, setSearchTerm] = useState('');
   const [inputValue, setInputValue] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('All');
+
+  // Initialize multiStepCreateEvent only if currentUser exists
+  const eventCreation = currentUser
+    ? multiStepCreateEvent({
+        userId: currentUser.uid,
+        onSuccess: async (newEventData: NormalizedEventData) => {
+          setEvents((prev) => [newEventData, ...prev].slice(0, 4));
+          setShowMultiStepModal(false);
+          toast.success('Event created successfully!');
+        },
+        onError: (message: string) => {
+          setError(message);
+          toast.error(message);
+        },
+      })
+    : null;
 
   const {
     step,
@@ -64,18 +81,34 @@ function Home() {
     selectedImageIndex,
     setSelectedImageIndex,
     searchImages,
-  } = multiStepCreateEvent({
-    userId: currentUser?.uid || '',
-    onSuccess: async (newEventData: NormalizedEventData) => {
-      setEvents((prev) => [newEventData, ...prev].slice(0, 4));
-      setShowMultiStepModal(false);
-      toast.success('Event created successfully!');
+  } = eventCreation || {
+    step: 1,
+    newEvent: {
+      title: '',
+      location: '',
+      date: '',
+      visibility: 'public' as 'public' | 'private',
+      organizers: [],
+      inviteLink: '',
+      description: '',
+      selectedImage: null,
+      searchedImages: [],
+      category: 'General' as 'General' | 'Music' | 'Food' | 'Tech' | 'Refreshments' | 'Catering/Food' | 'Venue Provider',
     },
-    onError: (message: string) => {
-      setError(message);
-      toast.error(message);
-    },
-  });
+    setNewEvent: () => {},
+    handleNextStep: () => {},
+    handlePrevStep: () => {},
+    handleCreateEvent: () => Promise.resolve(),
+    loading: false,
+    searchedImages: [],
+    followers: [],
+    followerNames: {},
+    createShareLink: () => '',
+    userPhotoURL: null,
+    selectedImageIndex: null,
+    setSelectedImageIndex: () => {},
+    searchImages: () => Promise.resolve(),
+  };
 
   const fadeIn = {
     hidden: { opacity: 0, y: 20 },
@@ -103,6 +136,13 @@ function Home() {
   );
 
   useEffect(() => {
+    if (loading) return;
+
+    if (!currentUser) {
+      navigate('/login');
+      return;
+    }
+
     const fetchData = () => {
       setLoadingEvents(true);
       setError(null);
@@ -113,16 +153,28 @@ function Home() {
         const eventData = snapshot.docs.map((doc) => {
           const data = doc.data();
 
-          // Normalize createdAt and date to strings
-          const createdAt = convertTimestampToString(data.createdAt);
+          const createdAt = convertTimestampToString(data.createdAt || Timestamp.now());
           const eventDate = data.date ? convertTimestampToString(data.date) : createdAt;
 
           return {
             id: doc.id,
-            ...data,
+            title: data.title || 'Untitled Event',
+            userId: data.userId || '',
+            location: data.location || '',
+            category: data.category || 'General',
+            description: data.description || undefined,
+            visibility: data.visibility || 'public',
+            organizers: data.organizers || [],
+            organizerId: data.organizerId || undefined,
+            inviteLink: data.inviteLink || undefined,
+            invitedUsers: data.invitedUsers || [],
+            pendingInvites: data.pendingInvites || [],
+            creatorName: data.creatorName || 'Unknown',
+            archived: data.archived ?? false,
+            image: data.image || undefined,
+            service: data.service || undefined,
             createdAt,
             date: eventDate,
-            pendingRequests: data.pendingRequests || [],
           } as NormalizedEventData;
         });
 
@@ -133,7 +185,7 @@ function Home() {
               eventDate >= today &&
               (selectedCategory === 'All' || event.category === selectedCategory) &&
               (event.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                event.location?.toLowerCase().includes(searchTerm.toLowerCase()))
+                event.location.toLowerCase().includes(searchTerm.toLowerCase()))
             );
           })
           .sort((a, b) => new Date(b.date || b.createdAt).getTime() - new Date(a.date || a.createdAt).getTime())
@@ -162,11 +214,8 @@ function Home() {
           setUsername(currentUser.email?.split('@')[0] || 'User');
         })
         .finally(() => setLoadingEvents(false));
-    } else {
-      setUsername('');
-      setLoadingEvents(false);
     }
-  }, [currentUser, selectedCategory, searchTerm]);
+  }, [currentUser, loading, navigate, selectedCategory, searchTerm]);
 
   const handleJoinEvent = useCallback(async (eventId: string) => {
     if (!currentUser) {
@@ -183,7 +232,7 @@ function Home() {
       }
 
       await updateDoc(eventRef, {
-        pendingRequests: arrayUnion(currentUser.uid),
+        pendingInvites: arrayUnion(currentUser.uid),
       });
 
       const notificationData: Omit<NotificationData, 'id'> = {
@@ -202,13 +251,40 @@ function Home() {
       toast.success('Join request sent! Waiting for admin approval.');
       setEvents((prev) =>
         prev.map((e) =>
-          e.id === eventId ? { ...e, pendingRequests: [...(e.pendingRequests || []), currentUser.uid] } : e
+          e.id === eventId ? { ...e, pendingInvites: [...e.pendingInvites, currentUser.uid] } : e
         )
       );
     } catch (err: any) {
       toast.error('Failed to send join request: ' + err.message);
     }
   }, [currentUser, events, username]);
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-gray-900 to-gray-800 flex items-center justify-center">
+        <div className="flex items-center space-x-3">
+          <svg
+            className="animate-spin h-8 w-8 text-yellow-400"
+            xmlns="http://www.w3.org/2000/svg"
+            fill="none"
+            viewBox="0 0 24 24"
+          >
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path
+              className="opacity-75"
+              fill="currentColor"
+              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+            />
+          </svg>
+          <span className="text-gray-300 text-base sm:text-lg font-medium">Loading...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return null; // Redirect is handled in useEffect
+  }
 
   if (loadingEvents) {
     return (
@@ -355,10 +431,10 @@ function Home() {
                     onClick={() => handleJoinEvent(events[0].id)}
                     className="bg-green-500 text-white px-4 sm:px-5 py-1 sm:py-2 rounded-full hover:bg-green-600 transition-all text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-green-500"
                     whileTap={{ scale: 0.95 }}
-                    disabled={(events[0].pendingRequests || []).includes(currentUser?.uid || '')}
+                    disabled={events[0].pendingInvites.includes(currentUser?.uid || '')}
                     aria-label={`Request to join ${events[0].title}`}
                   >
-                    {(events[0].pendingRequests || []).includes(currentUser?.uid || '') ? 'Pending' : 'Join'}
+                    {events[0].pendingInvites.includes(currentUser?.uid || '') ? 'Pending' : 'Join'}
                   </motion.button>
                 </div>
               </div>
@@ -472,10 +548,10 @@ function Home() {
                         animate={{ opacity: 1, y: 0 }}
                         transition={{ duration: 0.4, delay: 0.6 }}
                         whileTap={{ scale: 0.95 }}
-                        disabled={(event.pendingRequests || []).includes(currentUser?.uid || '')}
+                        disabled={event.pendingInvites.includes(currentUser?.uid || '')}
                         aria-label={`Request to join ${event.title}`}
                       >
-                        {(event.pendingRequests || []).includes(currentUser?.uid || '') ? 'Pending' : 'Join'}
+                        {event.pendingInvites.includes(currentUser?.uid || '') ? 'Pending' : 'Join'}
                       </motion.button>
                     </div>
                   </div>
@@ -577,7 +653,9 @@ function Home() {
                   transition={{ delay: 0.3 }}
                 >
                   <div>
-                    <label htmlFor="title" className="block text-xs sm:text-sm text-gray-300 mb-1">Event Title</label>
+                    <label htmlFor="title" className="block text-xs sm:text-sm text-gray-300 mb-1">
+                      Event Title
+                    </label>
                     <input
                       id="title"
                       value={newEvent.title}
@@ -589,7 +667,9 @@ function Home() {
                     />
                   </div>
                   <div>
-                    <label htmlFor="location" className="block text-xs sm:text-sm text-gray-300 mb-1">Location</label>
+                    <label htmlFor="location" className="block text-xs sm:text-sm text-gray-300 mb-1">
+                      Location
+                    </label>
                     <input
                       id="location"
                       value={newEvent.location}
@@ -601,7 +681,9 @@ function Home() {
                     />
                   </div>
                   <div>
-                    <label htmlFor="date" className="block text-xs sm:text-sm text-gray-300 mb-1">Date</label>
+                    <label htmlFor="date" className="block text-xs sm:text-sm text-gray-300 mb-1">
+                      Date
+                    </label>
                     <input
                       id="date"
                       type="date"
@@ -614,11 +696,15 @@ function Home() {
                     />
                   </div>
                   <div>
-                    <label htmlFor="visibility" className="block text-xs sm:text-sm text-gray-300 mb-1">Visibility</label>
+                    <label htmlFor="visibility" className="block text-xs sm:text-sm text-gray-300 mb-1">
+                      Visibility
+                    </label>
                     <select
                       id="visibility"
                       value={newEvent.visibility}
-                      onChange={(e) => setNewEvent({ ...newEvent, visibility: e.target.value as 'public' | 'private' })}
+                      onChange={(e) =>
+                        setNewEvent({ ...newEvent, visibility: e.target.value as 'public' | 'private' })
+                      }
                       className="w-full p-2 sm:p-3 rounded-lg bg-gray-700 text-gray-200 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-yellow-400 transition-all text-sm sm:text-base"
                       aria-label="Select event visibility"
                     >
@@ -627,14 +713,23 @@ function Home() {
                     </select>
                   </div>
                   <div>
-                    <label htmlFor="category" className="block text-xs sm:text-sm text-gray-300 mb-1">Category</label>
+                    <label htmlFor="category" className="block text-xs sm:text-sm text-gray-300 mb-1">
+                      Category
+                    </label>
                     <select
                       id="category"
                       value={newEvent.category}
                       onChange={(e) =>
                         setNewEvent({
                           ...newEvent,
-                          category: e.target.value as 'General' | 'Music' | 'Food' | 'Tech',
+                          category: e.target.value as
+                            | 'General'
+                            | 'Music'
+                            | 'Food'
+                            | 'Tech'
+                            | 'Refreshments'
+                            | 'Catering/Food'
+                            | 'Venue Provider',
                         })
                       }
                       className="w-full p-2 sm:p-3 rounded-lg bg-gray-700 text-gray-200 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-yellow-400 transition-all text-sm sm:text-base"
@@ -644,6 +739,9 @@ function Home() {
                       <option value="Music">Music</option>
                       <option value="Food">Food</option>
                       <option value="Tech">Tech</option>
+                      <option value="Refreshments">Refreshments</option>
+                      <option value="Catering/Food">Catering/Food</option>
+                      <option value="Venue Provider">Venue Provider</option>
                     </select>
                   </div>
                   <motion.button
@@ -679,7 +777,9 @@ function Home() {
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: 0.3 }}
                 >
-                  <p className="text-gray-300 text-center text-sm sm:text-base">Would you like to invite collaborators?</p>
+                  <p className="text-gray-300 text-center text-sm sm:text-base">
+                    Would you like to invite collaborators?
+                  </p>
                   <motion.button
                     onClick={() => handleNextStep()}
                     className="w-full bg-gray-600 text-gray-300 p-2 sm:p-3 rounded-lg hover:bg-gray-500 transition-all shadow-md text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-gray-500"
@@ -687,19 +787,8 @@ function Home() {
                     whileTap={{ scale: 0.95 }}
                     aria-label="Skip inviting collaborators"
                   >
-                    No
+                    Skip
                   </motion.button>
-                  {followers.length > 0 && (
-                    <motion.button
-                      onClick={handleNextStep}
-                      className="w-full bg-yellow-400 text-gray-900 p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-yellow-400"
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
-                      aria-label="Invite collaborators"
-                    >
-                      Yes
-                    </motion.button>
-                  )}
                   <div>
                     <h3 className="text-xs sm:text-sm text-gray-300 mb-2">Your Followers:</h3>
                     {followers.length > 0 ? (
@@ -712,44 +801,67 @@ function Home() {
                             animate={{ opacity: 1, y: 0 }}
                             transition={{ delay: 0.1 }}
                           >
-                            <span className="text-xs sm:text-sm text-gray-300">{followerNames[followerId] || followerId}</span>
+                            <span className="text-xs sm:text-sm text-gray-300">
+                              {followerNames[followerId] || followerId}
+                            </span>
                             <motion.button
                               onClick={() =>
                                 setNewEvent((prev: MultiStepEventData) => {
-                                  if (!prev.organizers.includes(followerId)) {
-                                    return { ...prev, organizers: [...prev.organizers, followerId] };
+                                  const isAlreadyOrganizer = prev.organizers.includes(followerId);
+                                  if (isAlreadyOrganizer) {
+                                    return {
+                                      ...prev,
+                                      organizers: prev.organizers.filter((id) => id !== followerId),
+                                    };
                                   }
-                                  return prev;
+                                  return { ...prev, organizers: [...prev.organizers, followerId] };
                                 })
                               }
-                              className="text-yellow-400 hover:text-yellow-300 transition-colors focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                              className={`text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-yellow-400 ${
+                                newEvent.organizers.includes(followerId)
+                                  ? 'text-red-400 hover:text-red-300'
+                                  : 'text-yellow-400 hover:text-yellow-300'
+                              } transition-colors`}
                               whileHover={{ scale: 1.2 }}
                               whileTap={{ scale: 0.9 }}
-                              aria-label={`Add ${followerNames[followerId] || followerId} as organizer`}
+                              aria-label={
+                                newEvent.organizers.includes(followerId)
+                                  ? `Remove ${followerNames[followerId] || followerId} as organizer`
+                                  : `Add ${followerNames[followerId] || followerId} as organizer`
+                              }
                             >
-                              <FaPlus size={14} />
+                              {newEvent.organizers.includes(followerId) ? 'Remove' : <FaPlus size={14} />}
                             </motion.button>
                           </motion.div>
                         ))}
                       </div>
                     ) : (
-                      <p className="text-xs sm:text-sm text-gray-400 text-center">You have no followers yet.</p>
+                      <p className="text-xs sm:text-sm text-gray-400 text-center">
+                        You have no followers to invite.
+                      </p>
                     )}
                   </div>
-                  <p className="text-xs sm:text-sm text-gray-300 text-center">
-                    Selected Organizers: {newEvent.organizers.map((org: string) => followerNames[org] || org).join(', ') || 'None'}
-                  </p>
+                  {newEvent.organizers.length > 0 && (
+                    <p className="text-xs sm:text-sm text-gray-300 text-center">
+                      Selected Organizers:{' '}
+                      {newEvent.organizers
+                        .filter((org) => org !== currentUser.uid) // Exclude the current user
+                        .map((org: string) => followerNames[org] || org)
+                        .join(', ') || 'None'}
+                    </p>
+                  )}
                   <motion.button
                     onClick={() => {
                       const link = createShareLink();
                       toast.success(`Invite link created: ${link}`);
+                      handleNextStep();
                     }}
                     className="w-full bg-yellow-400 text-gray-900 p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-yellow-400"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
-                    aria-label="Create share link for event"
+                    aria-label="Create share link and proceed"
                   >
-                    Create Share Link
+                    Create Share Link & Next
                   </motion.button>
                   <motion.button
                     type="button"
@@ -780,7 +892,9 @@ function Home() {
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: 0.3 }}
                 >
-                  <p className="text-gray-300 text-center text-sm sm:text-base">Select an image for your event:</p>
+                  <p className="text-gray-300 text-center text-sm sm:text-base">
+                    Select an image for your event:
+                  </p>
                   {searchedImages.length > 0 ? (
                     <div className="grid grid-cols-3 gap-2 sm:gap-3 max-h-40 sm:max-h-48 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-800">
                       {searchedImages.map((url: string, index: number) => (
@@ -789,7 +903,9 @@ function Home() {
                           src={url}
                           alt={`Event photo option ${index + 1}`}
                           className={`w-full h-20 sm:h-24 object-cover rounded-lg cursor-pointer hover:opacity-90 transition-all ${
-                            selectedImageIndex === index ? 'border-4 border-yellow-400' : 'border-2 border-transparent'
+                            selectedImageIndex === index
+                              ? 'border-4 border-yellow-400'
+                              : 'border-2 border-transparent'
                           }`}
                           onClick={() => {
                             setSelectedImageIndex(index);
@@ -803,10 +919,17 @@ function Home() {
                       ))}
                     </div>
                   ) : (
-                    <p className="text-xs sm:text-sm text-gray-400 text-center">No images found. Please proceed.</p>
+                    <p className="text-xs sm:text-sm text-gray-400 text-center">
+                      No images found. Using default image.
+                    </p>
                   )}
                   <div>
-                    <label htmlFor="description" className="block text-xs sm:text-sm text-gray-300 mb-1 sm:mb-2">Description (optional)</label>
+                    <label
+                      htmlFor="description"
+                      className="block text-xs sm:text-sm text-gray-300 mb-1 sm:mb-2"
+                    >
+                      Description (optional)
+                    </label>
                     <textarea
                       id="description"
                       value={newEvent.description}
@@ -823,7 +946,7 @@ function Home() {
                     className="w-full bg-yellow-400 text-gray-900 p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-yellow-400"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
-                    disabled={multiStepLoading || !newEvent.selectedImage}
+                    disabled={multiStepLoading}
                     aria-label="Proceed to next step"
                   >
                     Next
@@ -857,7 +980,9 @@ function Home() {
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: 0.3 }}
                 >
-                  <p className="text-gray-300 text-center mb-3 sm:mb-4 text-sm sm:text-base">Preview your event:</p>
+                  <p className="text-gray-300 text-center mb-3 sm:mb-4 text-sm sm:text-base">
+                    Preview your event:
+                  </p>
                   <motion.div
                     className="relative w-full h-72 sm:h-80 bg-gray-700/50 rounded-xl overflow-hidden shadow-lg transition-all duration-300"
                     whileTap={{ scale: 0.98 }}
@@ -869,10 +994,31 @@ function Home() {
                       onError={(e) => (e.currentTarget.src = defaultEventImage)}
                     />
                     <div className="absolute inset-0 bg-gradient-to-t from-black/70 to-transparent flex flex-col justify-end p-3 sm:p-4 text-white">
-                      <h3 className="text-base sm:text-xl font-semibold line-clamp-1">{newEvent.title}</h3>
-                      <p className="text-xs sm:text-sm mt-1 line-clamp-1">{new Date(newEvent.date).toLocaleDateString()}</p>
-                      <p className="text-xs sm:text-sm line-clamp-1">{newEvent.location || 'Location TBD'}</p>
-                      <p className="text-xs sm:text-sm line-clamp-2 mt-1">{newEvent.description || 'No description'}</p>
+                      <h3 className="text-base sm:text-xl font-semibold line-clamp-1">
+                        {newEvent.title}
+                      </h3>
+                      <p className="text-xs sm:text-sm mt-1 line-clamp-1">
+                        {newEvent.date
+                          ? new Date(newEvent.date).toLocaleDateString()
+                          : 'Date TBD'}
+                      </p>
+                      <p className="text-xs sm:text-sm line-clamp-1">
+                        {newEvent.location || 'Location TBD'}
+                      </p>
+                      <p className="text-xs sm:text-sm line-clamp-2 mt-1">
+                        {newEvent.description || 'No description provided'}
+                      </p>
+                      <p className="text-xs sm:text-sm mt-1">
+                        Visibility: {newEvent.visibility}
+                      </p>
+                      <p className="text-xs sm:text-sm">
+                        Category: {newEvent.category}
+                      </p>
+                      {newEvent.inviteLink && (
+                        <p className="text-xs sm:text-sm mt-1 break-all">
+                          Invite Link: {newEvent.inviteLink}
+                        </p>
+                      )}
                     </div>
                   </motion.div>
                   <motion.button

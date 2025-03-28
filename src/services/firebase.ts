@@ -1,3 +1,4 @@
+// src/services/firebase.ts
 import { initializeApp } from 'firebase/app';
 import {
   getAuth,
@@ -6,6 +7,8 @@ import {
   signOut,
   User,
   updateProfile,
+  signInWithPopup,
+  GoogleAuthProvider,
 } from 'firebase/auth';
 import {
   getFirestore,
@@ -45,6 +48,9 @@ export const auth = getAuth(app);
 export const db = getFirestore(app);
 export const storage = getStorage(app);
 
+// Google Sign-In Provider
+const googleProvider = new GoogleAuthProvider();
+
 // Authentication Functions
 export const loginUser = async (email: string, password: string): Promise<User> => {
   try {
@@ -56,10 +62,48 @@ export const loginUser = async (email: string, password: string): Promise<User> 
   }
 };
 
+export const loginWithGoogle = async (): Promise<User> => {
+  try {
+    const userCredential = await signInWithPopup(auth, googleProvider);
+    const user = userCredential.user;
+
+    // Check if user document exists in Firestore, if not create one
+    const userDocRef = doc(db, 'users', user.uid);
+    const userDoc = await getDoc(userDocRef);
+    if (!userDoc.exists()) {
+      await setDoc(userDocRef, {
+        displayName: user.displayName || 'Anonymous',
+        email: user.email || '',
+        createdAt: new Date().toISOString(),
+        bio: '',
+        location: '',
+        photoURL: user.photoURL || '',
+        contactEmail: user.email || '',
+        contactPhone: '',
+        followers: [],
+        following: [],
+        notificationsEnabled: true,
+        role: 'user', // Default role for Google Sign-In users
+      });
+    }
+
+    return user;
+  } catch (error: any) {
+    console.error('Google Sign-In error:', error);
+    if (error.code === 'auth/popup-blocked') {
+      throw new Error('Popup blocked by browser. Please allow popups and try again.');
+    } else if (error.code === 'auth/popup-closed-by-user') {
+      throw new Error('Popup closed before completing authentication.');
+    }
+    throw new Error(`Google Sign-In failed: ${error.message}`);
+  }
+};
+
 export const registerUser = async (
   email: string,
   password: string,
-  displayName?: string
+  displayName?: string,
+  role: string = 'user' // Add role parameter with default value
 ): Promise<User> => {
   try {
     const userCredential = await createUserWithEmailAndPassword(auth, email, password);
@@ -78,6 +122,7 @@ export const registerUser = async (
       followers: [],
       following: [],
       notificationsEnabled: true,
+      role, // Use the provided role
     });
     return user;
   } catch (error: any) {
@@ -296,7 +341,6 @@ export const getUserData = async (userId: string): Promise<UserData | null> => {
     const userSnapshot = await getDoc(userDocRef);
     if (!userSnapshot.exists()) {
       console.warn(`No user document found for UID: ${userId}`);
-      // Create a default user document
       const defaultUserData: UserData = {
         displayName: 'Anonymous',
         email: '',
@@ -309,6 +353,7 @@ export const getUserData = async (userId: string): Promise<UserData | null> => {
         followers: [],
         following: [],
         notificationsEnabled: true,
+        role: 'user', // Add default role
       };
       await setDoc(userDocRef, defaultUserData);
       console.log(`Created default user document for UID: ${userId}`);
@@ -327,6 +372,7 @@ export const getUserData = async (userId: string): Promise<UserData | null> => {
       followers: data.followers || [],
       following: data.following || [],
       notificationsEnabled: data.notificationsEnabled ?? true,
+      role: data.role || 'user', // Ensure role is always present
     };
   } catch (error: any) {
     console.error('Error fetching user data:', error);
