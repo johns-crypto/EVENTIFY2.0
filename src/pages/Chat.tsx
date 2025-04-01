@@ -4,7 +4,6 @@ import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import {
   db,
-  storage,
   getUserEvents,
   getUserData,
   updateDoc,
@@ -16,13 +15,11 @@ import {
   onSnapshot,
   QuerySnapshot,
   DocumentData,
-  QueryDocumentSnapshot,
   setDoc,
   limit,
   startAfter,
   deleteDoc,
 } from '../services/firebase';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   FaPaperPlane,
@@ -39,14 +36,16 @@ import {
   FaArrowDown,
   FaBars,
   FaTimes,
+  FaHeart,
+  FaComment,
+  FaUserPlus,
 } from 'react-icons/fa';
 import { toast } from 'react-toastify';
 import CustomQRCode from '../components/CustomQRCode';
-import Cropper from 'react-easy-crop';
-import Slider from 'rc-slider';
-import 'rc-slider/assets/index.css';
 import debounce from 'lodash/debounce';
 import { openDB } from 'idb';
+import MediaEditor from '../components/MediaEditor';
+import { uploadImageToCloudinary } from '../utils/cloudinary';
 
 // Constants for pagination
 const MESSAGES_PER_PAGE = 20;
@@ -67,15 +66,6 @@ interface Message {
   brightness?: number;
   contrast?: number;
   saturation?: number;
-}
-
-interface Notification {
-  id: string;
-  type: 'like' | 'comment' | 'invite' | 'post';
-  message: string;
-  postId?: string;
-  eventId: string;
-  createdAt: string;
 }
 
 interface EventData {
@@ -135,7 +125,8 @@ const fetchAndCacheMedia = async (mediaUrl: string): Promise<string> => {
   if (cached) return cached;
 
   try {
-    const response = await fetch(mediaUrl);
+    const response = await fetch(mediaUrl, { mode: 'cors' });
+    if (!response.ok) throw new Error(`Failed to fetch media: ${response.statusText}`);
     const blob = await response.blob();
     const base64 = await new Promise<string>((resolve) => {
       const reader = new FileReader();
@@ -146,13 +137,13 @@ const fetchAndCacheMedia = async (mediaUrl: string): Promise<string> => {
     return base64;
   } catch (error) {
     console.error('Failed to fetch and cache media:', error);
-    return mediaUrl;
+    return mediaUrl; // Fallback to original URL if fetch fails
   }
 };
 
 function Chat() {
   const { eventId } = useParams<{ eventId: string }>();
-  const { currentUser } = useAuth();
+  const { currentUser, logout } = useAuth();
   const navigate = useNavigate();
   const [events, setEvents] = useState<EventData[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<EventData | null>(null);
@@ -160,12 +151,6 @@ function Chat() {
   const [newMessage, setNewMessage] = useState('');
   const [mediaFile, setMediaFile] = useState<File | null>(null);
   const [showMediaEditor, setShowMediaEditor] = useState(false);
-  const [crop, setCrop] = useState({ x: 0, y: 0 });
-  const [zoom, setZoom] = useState(1);
-  const [croppedAreaPixels, setCroppedAreaPixels] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
-  const [brightness, setBrightness] = useState(100);
-  const [contrast, setContrast] = useState(100);
-  const [saturation, setSaturation] = useState(100);
   const [overlayText, setOverlayText] = useState('');
   const [description, setDescription] = useState('');
   const [visibility, setVisibility] = useState<'private' | 'public'>('private');
@@ -174,9 +159,6 @@ function Chat() {
   const [error, setError] = useState<string | null>(null);
   const [showQRCode, setShowQRCode] = useState(false);
   const [inviteLink, setInviteLink] = useState('');
-  const [notifications, setNotifications] = useState<Notification[]>([]);
-  const [showNotifications, setShowNotifications] = useState(false);
-  const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [adminsOnlyTalk, setAdminsOnlyTalk] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [searchChatQuery, setSearchChatQuery] = useState('');
@@ -192,7 +174,7 @@ function Chat() {
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const modalRef = useRef<HTMLDivElement>(null);
 
-  // Animation variants from Events.tsx
+  // Animation variants
   const fadeIn = {
     hidden: { opacity: 0, y: 20 },
     visible: { opacity: 1, y: 0, transition: { duration: 0.4, ease: 'easeOut' } },
@@ -245,9 +227,6 @@ function Chat() {
             followers: [],
             following: [],
           });
-          setNotificationsEnabled(true);
-        } else {
-          setNotificationsEnabled(userData.notificationsEnabled ?? true);
         }
 
         const userEvents = await getUserEvents(currentUser.uid);
@@ -403,37 +382,6 @@ function Chat() {
     }
   }, [selectedEvent, lastVisibleMessage, hasMoreMessages, loadingMoreMessages, usersData]);
 
-  // Fetch notifications
-  useEffect(() => {
-    if (!currentUser) {
-      setNotifications([]);
-      return;
-    }
-
-    const q = query(
-      collection(db, 'users', currentUser.uid, 'notifications'),
-      orderBy('createdAt', 'desc')
-    );
-
-    const unsubscribe = onSnapshot(
-      q,
-      (snapshot) => {
-        setNotifications(
-          snapshot.docs.map((doc) => ({
-            id: doc.id,
-            ...doc.data(),
-          }) as Notification)
-        );
-      },
-      (err) => {
-        setError(`Failed to load notifications: ${(err as Error).message}`);
-        toast.error('Failed to load notifications.');
-      }
-    );
-
-    return () => unsubscribe();
-  }, [currentUser]);
-
   // Typing indicator
   const debouncedHandleTyping = useCallback(
     debounce(async () => {
@@ -511,17 +459,16 @@ function Chat() {
         let type: 'photo' | 'video' | undefined = undefined;
 
         if (mediaFile) {
-          const storageRef = ref(storage, `chat/${selectedEvent.id}/${mediaFile.name}-${Date.now()}`);
-          await uploadBytes(storageRef, mediaFile);
-          mediaUrl = await getDownloadURL(storageRef);
           if (mediaFile.type.startsWith('image')) {
+            mediaUrl = await uploadImageToCloudinary(mediaFile);
             type = 'photo';
+            await fetchAndCacheMedia(mediaUrl);
           } else if (mediaFile.type.startsWith('video')) {
-            type = 'video';
+            throw new Error('Video uploads are not supported yet. Please upload an image.');
           }
         }
 
-        const messageData = {
+        const messageData: any = {
           text: newMessage || '',
           mediaUrl: mediaUrl || null,
           ...(type && { type }),
@@ -530,15 +477,19 @@ function Chat() {
           visibility: postVisibility,
           description: description || '',
           overlayText: overlayText || '',
-          brightness,
-          contrast,
-          saturation,
         };
+
+        // Only include brightness, contrast, and saturation if they are defined
+        if (mediaFile) {
+          messageData.brightness = messageData.brightness ?? 100;
+          messageData.contrast = messageData.contrast ?? 100;
+          messageData.saturation = messageData.saturation ?? 100;
+        }
 
         await addDoc(collection(db, 'events', selectedEvent.id, 'chat'), messageData);
 
         if (mediaFile && postVisibility === 'public') {
-          const postDoc = await addDoc(collection(db, 'events', selectedEvent.id, 'posts'), {
+          await addDoc(collection(db, 'events', selectedEvent.id, 'posts'), {
             userId: currentUser.uid,
             eventId: selectedEvent.id,
             mediaUrl,
@@ -549,18 +500,6 @@ function Chat() {
             createdAt: new Date().toISOString(),
             description: description || '',
           });
-
-          for (const organizerId of selectedEvent.organizers) {
-            if (organizerId !== currentUser.uid) {
-              await addDoc(collection(db, 'users', organizerId, 'notifications'), {
-                type: 'post',
-                message: `${currentUser.displayName || 'A user'} posted in ${selectedEvent.title || 'an event'}`,
-                eventId: selectedEvent.id,
-                postId: postDoc.id,
-                createdAt: new Date().toISOString(),
-              });
-            }
-          }
         }
 
         setNewMessage('');
@@ -568,9 +507,6 @@ function Chat() {
         setOverlayText('');
         setDescription('');
         setShowMediaEditor(false);
-        setBrightness(100);
-        setContrast(100);
-        setSaturation(100);
       } catch (err) {
         setError(`Failed to send message: ${(err as Error).message}`);
         toast.error('Failed to send message.');
@@ -578,7 +514,7 @@ function Chat() {
         setUploading(false);
       }
     },
-    [selectedEvent, currentUser, newMessage, mediaFile, description, overlayText, brightness, contrast, saturation]
+    [selectedEvent, currentUser, newMessage, mediaFile, description, overlayText, visibility]
   );
 
   // Delete message
@@ -617,16 +553,6 @@ function Chat() {
           ? message.likes.filter((id) => id !== currentUser.uid)
           : [...(message.likes || []), currentUser.uid];
         await updateDoc(messageRef, { likes });
-
-        if (likes.includes(currentUser.uid) && message.userId !== currentUser.uid) {
-          await addDoc(collection(db, 'users', message.userId, 'notifications'), {
-            type: 'like',
-            message: `${currentUser.displayName || 'A user'} liked your message in ${selectedEvent.title || 'an event'}`,
-            eventId: selectedEvent.id,
-            postId: messageId,
-            createdAt: new Date().toISOString(),
-          });
-        }
       } catch (err) {
         toast.error(`Failed to update like: ${(err as Error).message}`);
       }
@@ -645,16 +571,6 @@ function Chat() {
         const messageRef = doc(db, 'events', selectedEvent.id, 'chat', messageId);
         const comments = [...(message.comments || []), { userId: currentUser.uid, text: commentText }];
         await updateDoc(messageRef, { comments });
-
-        if (message.userId !== currentUser.uid) {
-          await addDoc(collection(db, 'users', message.userId, 'notifications'), {
-            type: 'comment',
-            message: `${currentUser.displayName || 'A user'} commented on your message in ${selectedEvent.title || 'an event'}`,
-            eventId: selectedEvent.id,
-            postId: messageId,
-            createdAt: new Date().toISOString(),
-          });
-        }
       } catch (err) {
         toast.error(`Failed to add comment: ${(err as Error).message}`);
       }
@@ -771,64 +687,16 @@ function Chat() {
     [currentUser, selectedEvent]
   );
 
-  // Media editing
-  const onCropComplete = useCallback((_: any, croppedAreaPixels: any) => {
-    setCroppedAreaPixels(croppedAreaPixels);
-  }, []);
-
-  const getCroppedImg = async () => {
-    if (!croppedAreaPixels || !mediaFile) {
-      throw new Error('Cropped area or media file is not defined');
-    }
-    const canvas = document.createElement('canvas');
-    const image = new Image();
-    image.src = URL.createObjectURL(mediaFile);
-    await new Promise((resolve) => (image.onload = resolve));
-    canvas.width = croppedAreaPixels.width;
-    canvas.height = croppedAreaPixels.height;
-    const ctx = canvas.getContext('2d');
-    if (ctx) {
-      ctx.drawImage(
-        image,
-        croppedAreaPixels.x,
-        croppedAreaPixels.y,
-        croppedAreaPixels.width,
-        croppedAreaPixels.height,
-        0,
-        0,
-        croppedAreaPixels.width,
-        croppedAreaPixels.height
-      );
-    }
-    return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), 'image/jpeg'));
-  };
-
-  const applyMediaEdits = async () => {
+  // Handle logout
+  const handleLogout = async () => {
     try {
-      const croppedBlob = await getCroppedImg();
-      if (croppedBlob) {
-        const croppedFile = new File([croppedBlob as Blob], 'cropped.jpg', { type: 'image/jpeg' });
-        setMediaFile(croppedFile);
-      }
+      await logout();
+      navigate('/');
+      toast.success('Logged out successfully.');
     } catch (err) {
-      setError(`Failed to apply edits: ${(err as Error).message}`);
-      toast.error('Failed to apply edits.');
+      toast.error(`Failed to logout: ${(err as Error).message}`);
     }
   };
-
-  // Toggle notifications
-  const toggleNotifications = useCallback(async () => {
-    if (!currentUser) return;
-
-    try {
-      const userRef = doc(db, 'users', currentUser.uid);
-      await updateDoc(userRef, { notificationsEnabled: !notificationsEnabled });
-      setNotificationsEnabled((prev) => !prev);
-      toast.success(`Notifications ${notificationsEnabled ? 'disabled' : 'enabled'}.`);
-    } catch (err) {
-      toast.error(`Failed to toggle notifications: ${(err as Error).message}`);
-    }
-  }, [currentUser, notificationsEnabled]);
 
   // Memoized filtered data
   const filteredEvents = useMemo(
@@ -852,107 +720,165 @@ function Chat() {
     const user = usersData[msg.userId] || { displayName: 'Anonymous', photoURL: undefined };
     const isOwnMessage = msg.userId === currentUser?.uid;
     const [mediaSrc, setMediaSrc] = useState<string | null>(null);
+    const [mediaError, setMediaError] = useState<string | null>(null);
 
     useEffect(() => {
       if (msg.mediaUrl) {
-        fetchAndCacheMedia(msg.mediaUrl).then((src) => setMediaSrc(src));
+        fetchAndCacheMedia(msg.mediaUrl)
+          .then((src) => {
+            setMediaSrc(src);
+            setMediaError(null);
+          })
+          .catch((err) => {
+            setMediaError('Failed to load media.');
+            console.error('Media load error:', err);
+          });
       }
     }, [msg.mediaUrl]);
 
     return (
       <motion.div
-        className={`mb-4 flex ${isOwnMessage ? 'justify-end' : 'justify-start'}`}
+        className={`flex ${isOwnMessage ? 'justify-end' : 'justify-start'} mb-4 px-4`}
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
       >
-        <div className={`flex items-start ${isOwnMessage ? 'flex-row-reverse' : 'flex-row'} gap-2 max-w-[80%] sm:max-w-md`}>
-          <div className="w-10 h-10 rounded-full overflow-hidden">
-            {user.photoURL ? (
-              <img
-                src={user.photoURL}
-                alt={`${user.displayName}'s avatar`}
-                className="w-full h-full object-cover"
-                loading="lazy"
-              />
-            ) : (
-              <div className="w-full h-full bg-neutral-mediumGray flex items-center justify-center text-accent-gold text-lg">
-                {user.displayName.charAt(0).toUpperCase()}
-              </div>
-            )}
-          </div>
+        <div className={`flex ${isOwnMessage ? 'flex-row-reverse' : 'flex-row'} items-start gap-3 max-w-[70%] sm:max-w-[60%]`}>
+          {/* User Avatar (only for incoming messages) */}
+          {!isOwnMessage && (
+            <div className="w-10 h-10 rounded-full overflow-hidden shadow-md flex-shrink-0">
+              {user.photoURL ? (
+                <img
+                  src={user.photoURL}
+                  alt={`${user.displayName}'s avatar`}
+                  className="w-full h-full object-cover"
+                  loading="lazy"
+                />
+              ) : (
+                <div className="w-full h-full bg-gray-700 flex items-center justify-center text-yellow-400 text-lg font-semibold">
+                  {user.displayName.charAt(0).toUpperCase()}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Chat Bubble */}
           <div
-            className={`flex-1 p-3 rounded-lg relative overflow-hidden ${
+            className={`relative p-4 rounded-2xl shadow-lg transition-all duration-300 ${
               isOwnMessage
-                ? 'bg-gradient-to-r from-accent-gold/70 to-yellow-300/70 text-neutral-darkGray'
-                : 'bg-neutral-mediumGray/50 backdrop-blur-lg text-neutral-lightGray'
-            } shadow-md border border-neutral-mediumGray/50`}
+                ? 'bg-gray-800/90 text-gray-200'
+                : 'bg-white text-gray-900'
+            } hover:shadow-xl`}
           >
-            <div className="flex justify-between items-center mb-1">
-              <p className="text-xs font-semibold text-accent-gold">{user.displayName}</p>
+            {/* User Name and Delete Button */}
+            <div className="flex justify-between items-center mb-2">
+              <p className="text-sm font-semibold text-yellow-400">{user.displayName}</p>
               {(isOwnMessage || selectedEvent?.organizers.includes(currentUser?.uid || '')) && (
                 <motion.button
                   onClick={() => deleteMessage(msg.id)}
-                  className="text-red-500 hover:text-red-400 transition-colors"
+                  className="text-red-400 hover:text-red-300 transition-colors group relative"
                   whileHover={{ scale: 1.1 }}
                   whileTap={{ scale: 0.9 }}
                   aria-label="Delete message"
                 >
                   <FaTrash size={12} />
+                  <span className="absolute left-1/2 transform -translate-x-1/2 bottom-6 bg-gray-900 text-white text-xs rounded py-1 px-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                    Delete
+                  </span>
                 </motion.button>
               )}
             </div>
+
+            {/* Message Content */}
             {msg.text && <p className="text-sm break-words">{msg.text}</p>}
-            {msg.overlayText && <p className="font-semibold text-sm mt-1">{msg.overlayText}</p>}
-            {msg.mediaUrl && mediaSrc && (
-              <div className="relative mt-2 w-full h-32 rounded-lg overflow-hidden">
-                {msg.type === 'photo' ? (
-                  <img
-                    src={mediaSrc}
-                    alt="Chat media"
-                    className="w-full h-full object-cover"
-                    loading="lazy"
-                    style={{
-                      filter: `brightness(${msg.brightness ?? 100}%) contrast(${msg.contrast ?? 100}%) saturate(${msg.saturation ?? 100}%)`,
-                    }}
-                  />
+            {msg.overlayText && <p className="font-semibold text-sm mt-1 text-gray-300">{msg.overlayText}</p>}
+            {msg.mediaUrl && (
+              <div className="relative mt-2 w-full h-48 rounded-lg overflow-hidden">
+                {mediaError ? (
+                  <div className="w-full h-full flex items-center justify-center bg-gray-700 text-red-400 text-sm">
+                    {mediaError}
+                  </div>
+                ) : mediaSrc ? (
+                  <>
+                    {msg.type === 'photo' ? (
+                      <img
+                        src={mediaSrc}
+                        alt="Chat media"
+                        className="w-full h-full object-cover"
+                        loading="lazy"
+                        style={{
+                          filter: `brightness(${msg.brightness ?? 100}%) contrast(${msg.contrast ?? 100}%) saturate(${msg.saturation ?? 100}%)`,
+                        }}
+                        onError={() => setMediaError('Failed to load media.')}
+                      />
+                    ) : (
+                      <video
+                        src={mediaSrc}
+                        controls
+                        className="w-full h-full object-cover"
+                        onError={() => setMediaError('Failed to load media.')}
+                      />
+                    )}
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent" />
+                  </>
                 ) : (
-                  <video src={mediaSrc} controls className="w-full h-full object-cover" />
+                  <div className="w-full h-full flex items-center justify-center bg-gray-700 text-gray-400 text-sm">
+                    Loading media...
+                  </div>
                 )}
-                <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent" />
               </div>
             )}
-            {msg.description && <p className="text-xs mt-1 italic">{msg.description}</p>}
-            <p className="text-xs text-neutral-lightGray mt-1">{new Date(msg.createdAt).toLocaleTimeString()}</p>
+            {msg.description && <p className="text-xs mt-2 italic text-gray-400">{msg.description}</p>}
+
+            {/* Timestamp */}
+            <p className="text-xs text-gray-500 mt-2">
+              {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </p>
+
+            {/* Likes and Comments */}
             {msg.visibility === 'public' && (
-              <div className="flex gap-2 mt-2">
+              <div className="flex gap-3 mt-3">
                 <motion.button
                   onClick={() => handleLike(msg.id)}
-                  className={`text-sm ${msg.likes?.includes(currentUser?.uid || '') ? 'text-accent-gold' : 'text-neutral-lightGray'}`}
+                  className={`text-sm flex items-center gap-1 ${
+                    msg.likes?.includes(currentUser?.uid || '') ? 'text-yellow-400' : 'text-gray-400'
+                  } hover:text-yellow-300 transition-colors group relative`}
                   whileHover={{ scale: 1.1 }}
                   whileTap={{ scale: 0.9 }}
                   aria-label={msg.likes?.includes(currentUser?.uid || '') ? 'Unlike message' : 'Like message'}
                 >
-                  ❤️ {msg.likes?.length || 0}
+                  <FaHeart size={14} />
+                  <span>{msg.likes?.length || 0}</span>
+                  <span className="absolute left-1/2 transform -translate-x-1/2 bottom-6 bg-gray-900 text-white text-xs rounded py-1 px-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                    {msg.likes?.includes(currentUser?.uid || '') ? 'Unlike' : 'Like'}
+                  </span>
                 </motion.button>
                 <motion.button
                   onClick={() => {
                     const comment = prompt('Enter your comment:');
                     if (comment) handleComment(msg.id, comment);
                   }}
-                  className="text-sm text-neutral-lightGray"
+                  className="text-sm flex items-center gap-1 text-gray-400 hover:text-yellow-300 transition-colors group relative"
                   whileHover={{ scale: 1.1 }}
                   whileTap={{ scale: 0.9 }}
                   aria-label="Comment on message"
                 >
-                  💬 {msg.comments?.length || 0}
+                  <FaComment size={14} />
+                  <span>{msg.comments?.length || 0}</span>
+                  <span className="absolute left-1/2 transform -translate-x-1/2 bottom-6 bg-gray-900 text-white text-xs rounded py-1 px-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                    Comment
+                  </span>
                 </motion.button>
               </div>
             )}
+
+            {/* Comments Display */}
             {msg.comments && msg.comments.length > 0 && (
-              <div className="mt-2">
+              <div className="mt-3 space-y-2">
                 {msg.comments.map((comment, idx) => (
-                  <p key={idx} className="text-xs text-neutral-lightGray">
-                    <span className="font-semibold">{usersData[comment.userId]?.displayName || 'Anonymous'}:</span>{' '}
+                  <p key={idx} className="text-xs text-gray-400">
+                    <span className="font-semibold text-yellow-400">
+                      {usersData[comment.userId]?.displayName || 'Anonymous'}:
+                    </span>{' '}
                     {comment.text}
                   </p>
                 ))}
@@ -966,432 +892,392 @@ function Chat() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-neutral-darkGray flex items-center justify-center">
-        <div className="flex items-center space-x-3">
-          <svg
-            className="animate-spin h-8 w-8 text-accent-gold"
-            xmlns="http://www.w3.org/2000/svg"
-            fill="none"
-            viewBox="0 0 24 24"
-          >
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-            <path
-              className="opacity-75"
-              fill="currentColor"
-              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-            />
-          </svg>
-          <span className="text-neutral-lightGray text-base sm:text-lg font-medium">Loading Chat...</span>
-        </div>
+      <div className="min-h-screen flex items-center justify-center bg-gray-900">
+        <motion.div
+          className="text-yellow-400 text-2xl"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.5 }}
+        >
+          Loading...
+        </motion.div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="min-h-screen bg-neutral-darkGray flex items-center justify-center flex-col">
-        <p className="text-red-500 text-sm sm:text-lg">{error}</p>
-        <button
-          onClick={() => navigate('/events')}
-          className="mt-4 bg-accent-gold text-neutral-darkGray font-semibold rounded-full px-5 py-2 sm:px-6 sm:py-3 hover:bg-yellow-300 transition-all shadow-lg text-sm sm:text-base"
+      <div className="min-h-screen flex items-center justify-center bg-gray-900">
+        <motion.div
+          className="text-red-400 text-xl"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.5 }}
         >
-          Back to Events
-        </button>
+          {error}
+        </motion.div>
+      </div>
+    );
+  }
+
+  if (!selectedEvent) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-900">
+        <motion.div
+          className="text-yellow-400 text-xl"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.5 }}
+        >
+          No event selected.
+        </motion.div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-neutral-darkGray text-neutral-lightGray flex">
-      {/* Sidebar */}
+    <div className="flex flex-col md:flex-row min-h-screen bg-gray-900">
+      {/* Sidebar (Chat List) */}
       <motion.div
-        className={`fixed inset-y-0 left-0 w-80 bg-neutral-mediumGray/50 backdrop-blur-lg transform ${
-          isSidebarOpen ? 'translate-x-0' : '-translate-x-full'
-        } md:relative md:translate-x-0 transition-transform duration-300 ease-in-out z-20 shadow-xl border-r border-neutral-mediumGray/50`}
-        initial={{ x: '-100%' }}
-        animate={{ x: isSidebarOpen ? 0 : '-100%' }}
-        transition={{ duration: 0.3 }}
+        className={`md:w-64 bg-gray-800/90 backdrop-blur-lg p-4 z-40 md:static md:block ${
+          isSidebarOpen ? 'block fixed inset-y-0 left-0 w-64' : 'hidden'
+        } md:h-[calc(100vh-4rem)] md:overflow-y-auto`} // Adjusted for desktop
+        initial={{ x: -256 }}
+        animate={{ x: isSidebarOpen ? 0 : -256 }}
+        transition={{ type: 'spring', stiffness: 300, damping: 30 }}
       >
-        <div className="p-4 sm:p-6">
-          <div className="flex items-center justify-between mb-4 sm:mb-6">
+        <div className="flex justify-between items-center mb-6">
+          <Link to="/events">
             <motion.h2
-              className="text-xl sm:text-2xl font-bold text-accent-gold"
-              initial="hidden"
-              animate="visible"
-              variants={headingFade}
+              className="text-2xl font-bold text-yellow-400"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.2 }}
             >
-              Event Chats
-              <span className="bg-red-500 text-white px-2 sm:px-3 py-1 rounded-full text-xs sm:text-sm ml-2 sm:ml-3">
-                {filteredEvents.length} Live
-              </span>
+              Eventify
             </motion.h2>
-            <motion.button
-              onClick={() => navigate('/events')}
-              className="text-accent-gold hover:text-yellow-300 transition-all"
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              aria-label="Add New Event"
-            >
-              <FaPlus size={20} />
-            </motion.button>
-          </div>
+          </Link>
+          <button
+            onClick={() => setIsSidebarOpen(false)}
+            className="text-gray-400 hover:text-yellow-400 md:hidden"
+            aria-label="Close sidebar"
+          >
+            <FaTimes size={20} />
+          </button>
+        </div>
+
+        {/* Search Events */}
+        <div className="mb-6">
           <input
             type="text"
+            placeholder="Search events..."
             value={searchEventQuery}
             onChange={(e) => setSearchEventQuery(e.target.value)}
-            placeholder="Search events..."
-            className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-neutral-lightGray border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
+            className="w-full p-2 rounded-lg bg-gray-700 text-gray-200 border border-gray-600/50 focus:outline-none focus:ring-2 focus:ring-yellow-400 transition-all text-sm"
           />
-          <motion.div
-            className="mt-4 sm:mt-6 space-y-4 max-h-[calc(100vh-200px)] overflow-y-auto scrollbar-thin scrollbar-thumb-neutral-mediumGray scrollbar-track-neutral-darkGray"
-            initial="hidden"
-            animate="visible"
-            variants={stagger}
-          >
-            {filteredEvents.map((event) => (
-              <motion.div
-                key={event.id}
-                className={`rounded-lg overflow-hidden shadow-md cursor-pointer relative ${
-                  selectedEvent?.id === event.id ? 'border-2 border-accent-gold' : 'border border-neutral-mediumGray/50'
-                }`}
-                onClick={() => {
-                  navigate(`/chat/${event.id}`);
-                  setIsSidebarOpen(false);
-                }}
-                variants={fadeIn}
-                whileHover={{ scale: 1.02 }}
-                whileTap={{ scale: 0.98 }}
-              >
-                <div className="relative w-full h-32">
-                  <img
-                    src={event.image || 'https://placehold.co/40x40?text=Event'}
-                    alt={event.title || 'Event'}
-                    className="w-full h-full object-cover"
-                  />
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/70 to-transparent flex flex-col justify-end p-3">
-                    <h3 className="text-sm font-semibold text-accent-gold line-clamp-1">{event.title || 'Untitled Event'}</h3>
-                    <p className="text-xs text-neutral-lightGray mt-1 line-clamp-1">
-                      {new Date(event.date || event.createdAt || Date.now()).toLocaleDateString()}
-                    </p>
-                    <p className="text-xs text-neutral-lightGray line-clamp-1">{event.location || 'Location TBD'}</p>
-                  </div>
-                  <span className="absolute top-2 right-2 bg-red-500 text-white px-2 py-1 rounded-full text-xs">
-                    Live
-                  </span>
-                </div>
-              </motion.div>
-            ))}
-          </motion.div>
         </div>
+
+        {/* Event List */}
+        <motion.div className="space-y-3" variants={stagger} initial="hidden" animate="visible">
+          {filteredEvents.map((event) => (
+            <motion.div key={event.id} variants={fadeIn}>
+              <Link
+                to={`/chat/${event.id}`}
+                className={`flex items-center gap-3 p-3 rounded-lg transition-all ${
+                  selectedEvent.id === event.id
+                    ? 'bg-yellow-400 text-gray-900'
+                    : 'bg-gray-700/50 text-gray-200 hover:bg-gray-600/50'
+                }`}
+                onClick={() => setIsSidebarOpen(false)}
+              >
+                <div className="w-10 h-10 rounded-full overflow-hidden">
+                  {event.image ? (
+                    <img
+                      src={event.image}
+                      alt={`${event.title} image`}
+                      className="w-full h-full object-cover"
+                      loading="lazy"
+                    />
+                  ) : (
+                    <div className="w-full h-full bg-gray-600 flex items-center justify-center text-yellow-400 text-lg font-semibold">
+                      {event.title.charAt(0).toUpperCase()}
+                    </div>
+                  )}
+                </div>
+                <div className="flex-1">
+                  <p className="text-sm font-semibold">{event.title}</p>
+                  <p className="text-xs text-gray-400">
+                    {event.date
+                      ? new Date(event.date).toLocaleDateString()
+                      : event.createdAt
+                      ? new Date(event.createdAt).toLocaleDateString()
+                      : 'No date'}
+                  </p>
+                </div>
+              </Link>
+            </motion.div>
+          ))}
+        </motion.div>
+
+        {/* Create Event Button (Navigates to /events) */}
+        <Link to="/events">
+          <motion.button
+            className="w-full mt-6 flex items-center gap-2 p-3 bg-yellow-400 text-gray-900 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm"
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+          >
+            <FaPlus /> <span>Create Event</span>
+          </motion.button>
+        </Link>
       </motion.div>
 
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col">
         {/* Header */}
-        <div className="bg-neutral-mediumGray/50 backdrop-blur-lg shadow p-4 sm:p-6 flex justify-between items-center border-b border-neutral-mediumGray/50">
+        <motion.header
+          className="bg-gray-800/90 backdrop-blur-lg p-4 flex justify-between items-center shadow-lg sticky top-0 z-30"
+          initial={{ y: -50 }}
+          animate={{ y: 0 }}
+          transition={{ type: 'spring', stiffness: 300, damping: 30 }}
+        >
           <div className="flex items-center gap-3">
-            <motion.button
-              className="md:hidden text-accent-gold"
-              onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              aria-label="Toggle sidebar"
+            <button
+              onClick={() => setIsSidebarOpen(true)}
+              className="text-gray-400 hover:text-yellow-400 md:hidden"
+              aria-label="Open sidebar"
             >
               <FaBars size={20} />
-            </motion.button>
+            </button>
             <motion.h1
-              className="text-xl sm:text-2xl font-bold text-accent-gold"
+              className="text-xl font-bold text-yellow-400"
+              variants={headingFade}
               initial="hidden"
               animate="visible"
-              variants={headingFade}
             >
-              <Link to={`/events?search=${selectedEvent?.title}`} className="hover:underline">
-                {selectedEvent?.title || 'Untitled Event'}
-              </Link>{' '}
-              Chat
+              {selectedEvent.title}
             </motion.h1>
           </div>
-          <div className="flex gap-3">
+          <div className="flex items-center gap-3">
             <motion.button
               onClick={() => setShowQRCode(true)}
-              className="text-accent-gold hover:text-yellow-300 transition-all"
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              aria-label="Share invite link"
-            >
-              Share Invite
-            </motion.button>
-            <motion.button
-              onClick={() => setShowNotifications(!showNotifications)}
-              className="relative text-accent-gold"
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              aria-label="Toggle notifications"
+              className="text-gray-400 hover:text-yellow-400 transition-colors group relative"
+              whileHover={{ scale: 1.1 }}
+              whileTap={{ scale: 0.9 }}
+              aria-label="Show QR code"
             >
               <FaBell size={20} />
-              {notifications.length > 0 && (
-                <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full h-5 w-5 flex items-center justify-center">
-                  {notifications.length}
-                </span>
-              )}
+              <span className="absolute left-1/2 transform -translate-x-1/2 bottom-8 bg-gray-900 text-white text-xs rounded py-1 px-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                Invite
+              </span>
             </motion.button>
             <motion.button
-              onClick={() => setShowSettings(!showSettings)}
-              className="text-accent-gold"
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              aria-label="Toggle settings"
+              onClick={() => setShowSettings(true)}
+              className="text-gray-400 hover:text-yellow-400 transition-colors group relative"
+              whileHover={{ scale: 1.1 }}
+              whileTap={{ scale: 0.9 }}
+              aria-label="Settings"
             >
               <FaCog size={20} />
+              <span className="absolute left-1/2 transform -translate-x-1/2 bottom-8 bg-gray-900 text-white text-xs rounded py-1 px-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                Settings
+              </span>
+            </motion.button>
+            <motion.button
+              onClick={handleLogout}
+              className="text-gray-400 hover:text-yellow-400 transition-colors group relative"
+              whileHover={{ scale: 1.1 }}
+              whileTap={{ scale: 0.9 }}
+              aria-label="Logout"
+            >
+              <FaSignOutAlt size={20} />
+              <span className="absolute left-1/2 transform -translate-x-1/2 bottom-8 bg-gray-900 text-white text-xs rounded py-1 px-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                Logout
+              </span>
             </motion.button>
           </div>
-        </div>
+        </motion.header>
 
         {/* Chat Messages */}
         <div
+          className="flex-1 p-4 overflow-y-auto"
           ref={chatContainerRef}
-          className="flex-1 overflow-y-auto p-4 sm:p-6 bg-neutral-darkGray relative"
-          style={{ maxHeight: 'calc(100vh - 200px)' }}
+          style={{ maxHeight: 'calc(100vh - 8rem)' }} // Adjusted to account for header and footer
         >
-          <input
-            type="text"
-            value={searchChatQuery}
-            onChange={(e) => setSearchChatQuery(e.target.value)}
-            placeholder="Search chat..."
-            className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-neutral-lightGray border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base mb-4"
-          />
-          {filteredMessages.length > 0 ? (
-            <>
-              {filteredMessages.map((msg) => (
-                <MessageRow key={msg.id} msg={msg} />
-              ))}
-              {hasMoreMessages && (
+          {/* Search Chat */}
+          <div className="mb-6">
+            <input
+              type="text"
+              placeholder="Search chat..."
+              value={searchChatQuery}
+              onChange={(e) => setSearchChatQuery(e.target.value)}
+              className="w-full p-2 rounded-lg bg-gray-700 text-gray-200 border border-gray-600/50 focus:outline-none focus:ring-2 focus:ring-yellow-400 transition-all text-sm"
+            />
+          </div>
+
+          {/* Messages */}
+          <motion.div className="space-y-4" variants={stagger} initial="hidden" animate="visible">
+            {filteredMessages.length === 0 ? (
+              <div className="text-center text-gray-400">No messages yet.</div>
+            ) : (
+              filteredMessages.map((msg) => <MessageRow key={msg.id} msg={msg} />)
+            )}
+            {loadingMoreMessages && (
+              <div className="text-center text-gray-400">Loading more messages...</div>
+            )}
+            {hasMoreMessages && !loadingMoreMessages && (
+              <div className="text-center">
                 <motion.button
                   onClick={loadMoreMessages}
-                  className="w-full p-2 sm:p-3 mt-2 text-accent-gold bg-neutral-mediumGray/50 backdrop-blur-lg rounded-lg hover:bg-neutral-mediumGray/80 transition-all shadow-md text-sm sm:text-base"
-                  disabled={loadingMoreMessages}
+                  className="text-yellow-400 hover:text-yellow-300 transition-colors text-sm"
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}
                 >
-                  {loadingMoreMessages ? 'Loading...' : 'Load More Messages'}
+                  Load More
                 </motion.button>
-              )}
-            </>
-          ) : (
-            <p className="text-neutral-lightGray text-center py-6 text-sm sm:text-base">No messages yet. Start the conversation!</p>
-          )}
-          <div ref={chatEndRef} />
-          {showScrollToBottom && (
-            <motion.button
-              onClick={() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })}
-              className="fixed bottom-20 right-4 bg-accent-gold text-neutral-darkGray p-2 rounded-full shadow-lg"
-              whileHover={{ scale: 1.1 }}
-              whileTap={{ scale: 0.9 }}
-              aria-label="Scroll to bottom"
+              </div>
+            )}
+            <div ref={chatEndRef} />
+          </motion.div>
+
+          {/* Typing Indicator */}
+          {typingUsers.length > 0 && (
+            <motion.div
+              className="flex items-center gap-2 mt-4 px-4"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
             >
-              <FaArrowDown size={20} />
-            </motion.button>
+              <p className="text-sm text-gray-400">
+                {typingUsers
+                  .slice(0, 3)
+                  .map((userId) => usersData[userId]?.displayName || 'Anonymous')
+                  .join(', ')}{' '}
+                {typingUsers.length > 3 && `and ${typingUsers.length - 3} others`} typing
+              </p>
+              <div className="flex gap-1">
+                {[0, 1, 2].map((i) => (
+                  <motion.div
+                    key={i}
+                    className="w-2 h-2 bg-yellow-400 rounded-full"
+                    animate={{
+                      y: [0, -5, 0],
+                      transition: { repeat: Infinity, delay: i * 0.2, duration: 0.6 },
+                    }}
+                  />
+                ))}
+              </div>
+            </motion.div>
           )}
         </div>
 
-        {/* Typing Indicator */}
-        {typingUsers.length > 0 && (
-          <div className="p-2 sm:p-3 text-sm text-neutral-lightGray">
-            {typingUsers.map((userId) => usersData[userId]?.displayName || 'Someone').join(', ')} {typingUsers.length > 1 ? 'are' : 'is'} typing...
-          </div>
+        {/* Scroll to Bottom Button */}
+        {showScrollToBottom && (
+          <motion.button
+            onClick={() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })}
+            className="fixed bottom-20 right-4 bg-yellow-400 text-gray-900 p-3 rounded-full shadow-lg hover:bg-yellow-300 transition-all"
+            initial={{ opacity: 0, scale: 0 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0 }}
+            whileHover={{ scale: 1.1 }}
+            whileTap={{ scale: 0.9 }}
+            aria-label="Scroll to bottom"
+          >
+            <FaArrowDown size={16} />
+          </motion.button>
         )}
 
         {/* Message Input */}
-        {selectedEvent && (
-          <div className="p-4 sm:p-6 border-t border-neutral-mediumGray/50">
-            {showMediaEditor && mediaFile && (
-              <motion.div
-                className="mb-4 p-4 sm:p-6 bg-neutral-mediumGray/50 backdrop-blur-lg rounded-lg shadow-md border border-neutral-mediumGray/50"
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-              >
-                <div className="relative w-full h-64 mb-4 rounded-lg overflow-hidden">
-                  <Cropper
-                    image={URL.createObjectURL(mediaFile)}
-                    crop={crop}
-                    zoom={zoom}
-                    aspect={4 / 3}
-                    onCropChange={setCrop}
-                    onZoomChange={setZoom}
-                    onCropComplete={onCropComplete}
-                  />
-                </div>
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-xs sm:text-sm text-neutral-lightGray mb-1">Brightness</label>
-                    <Slider
-                      min={0}
-                      max={200}
-                      value={brightness}
-                      onChange={(value: number | number[]) => {
-                        if (typeof value === 'number') setBrightness(value);
-                      }}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs sm:text-sm text-neutral-lightGray mb-1">Contrast</label>
-                    <Slider
-                      min={0}
-                      max={200}
-                      value={contrast}
-                      onChange={(value: number | number[]) => {
-                        if (typeof value === 'number') setContrast(value);
-                      }}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs sm:text-sm text-neutral-lightGray mb-1">Saturation</label>
-                    <Slider
-                      min={0}
-                      max={200}
-                      value={saturation}
-                      onChange={(value: number | number[]) => {
-                        if (typeof value === 'number') setSaturation(value);
-                      }}
-                    />
-                  </div>
-                  <input
-                    type="text"
-                    value={overlayText}
-                    onChange={(e) => setOverlayText(e.target.value)}
-                    className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-neutral-lightGray border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
-                    placeholder="Overlay text"
-                  />
-                  <textarea
-                    value={description}
-                    onChange={(e) => setDescription(e.target.value)}
-                    className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-neutral-lightGray border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
-                    rows={3}
-                    placeholder="Description"
-                  />
-                  <select
-                    value={visibility}
-                    onChange={(e) => setVisibility(e.target.value as 'private' | 'public')}
-                    className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-neutral-lightGray border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
-                    aria-label="Select message visibility"
-                  >
-                    <option value="private">Private (Chat Only)</option>
-                    <option value="public">Public (Chat & Feed)</option>
-                  </select>
-                  <div className="flex gap-2">
-                    <motion.button
-                      onClick={applyMediaEdits}
-                      className="flex-1 p-2 sm:p-3 bg-accent-gold text-neutral-darkGray rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base"
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
-                    >
-                      Apply Edits
-                    </motion.button>
-                    <motion.button
-                      onClick={() => {
-                        setShowMediaEditor(false);
-                        setMediaFile(null);
-                        setOverlayText('');
-                        setDescription('');
-                        setBrightness(100);
-                        setContrast(100);
-                        setSaturation(100);
-                      }}
-                      className="flex-1 p-2 sm:p-3 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-all shadow-md text-sm sm:text-base"
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
-                    >
-                      Cancel
-                    </motion.button>
-                  </div>
-                </div>
-              </motion.div>
+        <motion.div
+          className="bg-gray-800/90 backdrop-blur-lg p-4 flex items-center gap-3 shadow-lg sticky bottom-0 z-30"
+          initial={{ y: 50 }}
+          animate={{ y: 0 }}
+          transition={{ type: 'spring', stiffness: 300, damping: 30 }}
+        >
+          <input
+            type="file"
+            accept="image/*,video/*"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) {
+                setMediaFile(file);
+                setShowMediaEditor(true);
+              }
+              e.target.value = ''; // Reset input
+            }}
+            className="hidden"
+            id="media-upload"
+          />
+          <motion.label
+            htmlFor="media-upload"
+            className="text-gray-400 hover:text-yellow-400 transition-colors cursor-pointer group relative"
+            whileHover={{ scale: 1.1 }}
+            whileTap={{ scale: 0.9 }}
+            aria-label="Upload media"
+          >
+            <FaImage size={20} />
+            <span className="absolute left-1/2 transform -translate-x-1/2 bottom-8 bg-gray-900 text-white text-xs rounded py-1 px-2 opacity-0 group-hover:opacity-100 transition-opacity">
+              Upload Media
+            </span>
+          </motion.label>
+          <input
+            type="text"
+            value={newMessage}
+            onChange={(e) => {
+              setNewMessage(e.target.value);
+              debouncedHandleTyping();
+            }}
+            placeholder="Type a message..."
+            className="flex-1 p-2 rounded-lg bg-gray-700 text-gray-200 border border-gray-600/50 focus:outline-none focus:ring-2 focus:ring-yellow-400 transition-all text-sm"
+            onKeyPress={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage(visibility);
+              }
+            }}
+          />
+          <motion.button
+            onClick={() => sendMessage(visibility)}
+            disabled={uploading || (!newMessage.trim() && !mediaFile)}
+            className="bg-yellow-400 text-gray-900 p-2 rounded-lg hover:bg-yellow-300 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            aria-label="Send message"
+          >
+            {uploading ? (
+              <svg className="animate-spin h-5 w-5 text-gray-900" viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25" />
+                <path
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                  className="opacity-75"
+                />
+              </svg>
+            ) : (
+              <FaPaperPlane size={20} />
             )}
-            <div className="flex items-start gap-3">
-              <textarea
-                value={newMessage}
-                onChange={(e) => {
-                  setNewMessage(e.target.value);
-                  debouncedHandleTyping();
-                }}
-                onKeyPress={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    sendMessage(visibility);
-                  }
-                }}
-                className="flex-1 p-3 rounded-lg bg-neutral-mediumGray text-neutral-lightGray border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all resize-none text-sm sm:text-base"
-                rows={2}
-                placeholder="Type your message..."
-                disabled={uploading || (adminsOnlyTalk && currentUser && !selectedEvent.organizers.includes(currentUser.uid))}
-                aria-label="Type your message"
-              />
-              <div className="flex flex-col gap-2">
-                <label className="flex items-center gap-2 p-2 bg-neutral-mediumGray rounded-lg text-neutral-lightGray hover:bg-neutral-mediumGray/80 transition-all cursor-pointer">
-                  {mediaFile?.type.startsWith('video') ? <FaVideo size={20} /> : <FaImage size={20} />}
-                  <span className="sr-only">Upload media</span>
-                  <input
-                    type="file"
-                    accept="image/*,video/*"
-                    onChange={(e) => {
-                      const file = e.target.files?.[0] || null;
-                      setMediaFile(file);
-                      if (file) setShowMediaEditor(true);
-                    }}
-                    className="hidden"
-                    disabled={uploading}
-                    id="media-upload"
-                  />
-                </label>
-                <motion.button
-                  onClick={() => {
-                    if (mediaFile) setShowMediaEditor(true);
-                    else sendMessage(visibility);
-                  }}
-                  className="p-3 bg-accent-gold text-neutral-darkGray rounded-lg hover:bg-yellow-300 flex items-center justify-center disabled:opacity-50 transition-all shadow-md"
-                  disabled={uploading || (!newMessage.trim() && !mediaFile)}
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
-                  aria-label="Send message"
-                >
-                  {uploading ? (
-                    <svg className="animate-spin h-5 w-5 text-neutral-darkGray" viewBox="0 0 24 24">
-                      <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25" />
-                      <path
-                        fill="currentColor"
-                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                        className="opacity-75"
-                      />
-                    </svg>
-                  ) : (
-                    <FaPaperPlane size={20} />
-                  )}
-                </motion.button>
-              </div>
-            </div>
-            {mediaFile && !showMediaEditor && (
-              <div className="mt-2 flex items-center gap-2 text-neutral-lightGray">
-                <span className="text-sm">{mediaFile.name}</span>
-                <motion.button
-                  onClick={() => setMediaFile(null)}
-                  className="text-red-500 hover:text-red-400 transition-all"
-                  whileHover={{ scale: 1.1 }}
-                  whileTap={{ scale: 0.9 }}
-                  aria-label="Remove selected media"
-                >
-                  <FaTrash size={16} />
-                </motion.button>
-              </div>
-            )}
-          </div>
-        )}
+          </motion.button>
+        </motion.div>
       </div>
+
+      {/* Media Editor */}
+      <MediaEditor
+        mediaFile={mediaFile}
+        setMediaFile={setMediaFile}
+        showMediaEditor={showMediaEditor}
+        setShowMediaEditor={setShowMediaEditor}
+        setOverlayText={setOverlayText}
+        setDescription={setDescription}
+        setVisibility={setVisibility}
+        overlayText={overlayText}
+        description={description}
+        visibility={visibility}
+      />
 
       {/* QR Code Modal */}
       <AnimatePresence>
-        {showQRCode && selectedEvent && (
+        {showQRCode && (
           <motion.div
-            className="fixed inset-0 bg-black bg-opacity-70 backdrop-blur-sm flex items-center justify-center p-4 z-50 overflow-y-auto"
+            className="fixed inset-0 bg-black bg-opacity-70 backdrop-blur-sm flex items-center justify-center p-4 z-50"
             initial="hidden"
             animate="visible"
             exit="exit"
@@ -1399,127 +1285,33 @@ function Chat() {
             onClick={() => setShowQRCode(false)}
           >
             <motion.div
-              ref={modalRef}
               onClick={(e) => e.stopPropagation()}
-              className="bg-neutral-mediumGray/90 backdrop-blur-lg rounded-2xl max-w-md w-full mx-2 p-4 sm:p-6 relative shadow-2xl border border-neutral-mediumGray/50"
+              className="bg-gray-800/90 backdrop-blur-lg rounded-2xl max-w-sm w-full p-6 relative shadow-2xl border border-gray-700/50"
               role="dialog"
               aria-labelledby="qr-code-modal-title"
             >
               <motion.button
-                type="button"
                 onClick={() => setShowQRCode(false)}
-                className="absolute top-3 right-3 sm:top-4 sm:right-4 text-neutral-lightGray hover:text-accent-gold transition-colors z-10"
+                className="absolute top-4 right-4 text-gray-400 hover:text-yellow-400 transition-colors"
                 whileHover={{ scale: 1.2, rotate: 90 }}
                 whileTap={{ scale: 0.9 }}
-                aria-label="Close modal"
+                aria-label="Close QR code modal"
               >
                 <FaTimes size={20} />
               </motion.button>
               <motion.h2
                 id="qr-code-modal-title"
-                className="text-xl sm:text-2xl font-bold text-accent-gold mb-4 sm:mb-6 text-center"
+                className="text-2xl font-bold text-yellow-400 mb-6 text-center"
                 initial={{ opacity: 0, y: -20 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: 0.2 }}
               >
-                {selectedEvent.title || 'Untitled Event'}
+                Invite to {selectedEvent.title}
               </motion.h2>
-              <CustomQRCode
-                value={inviteLink}
-                size={200}
-                ariaLabel={`QR code for ${selectedEvent.title || 'event'} invite`}
-              />
-              <p className="mt-4 text-sm sm:text-base text-neutral-lightGray">
-                Time: {new Date(selectedEvent.date || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-              </p>
-              <p className="text-sm sm:text-base text-neutral-lightGray">
-                Date: {new Date(selectedEvent.date || Date.now()).toLocaleDateString()}
-              </p>
-              <motion.button
-                onClick={() => setShowQRCode(false)}
-                className="w-full bg-accent-gold text-neutral-darkGray p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md mt-4 text-sm sm:text-base"
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-              >
-                Close
-              </motion.button>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Notifications Modal */}
-      <AnimatePresence>
-        {showNotifications && (
-          <motion.div
-            className="fixed inset-0 md:inset-auto md:top-16 md:right-4 bg-black bg-opacity-70 md:bg-transparent backdrop-blur-sm flex items-center justify-center p-4 z-50 overflow-y-auto"
-            initial="hidden"
-            animate="visible"
-            exit="exit"
-            variants={modalVariants}
-            onClick={() => setShowNotifications(false)}
-          >
-            <motion.div
-              ref={modalRef}
-              onClick={(e) => e.stopPropagation()}
-              className="bg-neutral-mediumGray/90 backdrop-blur-lg rounded-2xl max-w-md w-full mx-2 p-4 sm:p-6 relative shadow-2xl border border-neutral-mediumGray/50"
-              role="dialog"
-              aria-labelledby="notifications-modal-title"
-            >
-              <motion.button
-                type="button"
-                onClick={() => setShowNotifications(false)}
-                className="absolute top-3 right-3 sm:top-4 sm:right-4 text-neutral-lightGray hover:text-accent-gold transition-colors z-10"
-                whileHover={{ scale: 1.2, rotate: 90 }}
-                whileTap={{ scale: 0.9 }}
-                aria-label="Close modal"
-              >
-                <FaTimes size={20} />
-              </motion.button>
-              <motion.h2
-                id="notifications-modal-title"
-                className="text-xl sm:text-2xl font-bold text-accent-gold mb-4 sm:mb-6 text-center"
-                initial={{ opacity: 0, y: -20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.2 }}
-              >
-                Notifications
-              </motion.h2>
-              <motion.button
-                onClick={toggleNotifications}
-                className="w-full p-2 sm:p-3 text-accent-gold bg-neutral-mediumGray/50 rounded-lg hover:bg-neutral-mediumGray/80 transition-all shadow-md mb-4 text-sm sm:text-base"
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-              >
-                {notificationsEnabled ? 'Disable Notifications' : 'Enable Notifications'}
-              </motion.button>
-              <div className="max-h-64 overflow-y-auto scrollbar-thin scrollbar-thumb-neutral-mediumGray scrollbar-track-neutral-darkGray space-y-2">
-                {notifications.length > 0 ? (
-                  notifications.map((notif) => (
-                    <motion.div
-                      key={notif.id}
-                      className={`p-2 sm:p-3 rounded-lg ${
-                        notificationsEnabled ? 'bg-neutral-mediumGray/50' : 'bg-neutral-mediumGray/30 opacity-50'
-                      } shadow-md border border-neutral-mediumGray/50`}
-                      initial={{ opacity: 0, y: 10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                    >
-                      <p className="text-neutral-lightGray text-sm">{notif.message}</p>
-                      <p className="text-xs text-neutral-lightGray mt-1">{new Date(notif.createdAt).toLocaleString()}</p>
-                    </motion.div>
-                  ))
-                ) : (
-                  <p className="text-neutral-lightGray text-center text-sm sm:text-base">No notifications.</p>
-                )}
+              <div className="flex justify-center mb-4">
+                <CustomQRCode value={inviteLink} />
               </div>
-              <motion.button
-                onClick={() => setShowNotifications(false)}
-                className="w-full bg-accent-gold text-neutral-darkGray p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md mt-4 text-sm sm:text-base"
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-              >
-                Close
-              </motion.button>
+              <p className="text-gray-400 text-center text-sm break-all">{inviteLink}</p>
             </motion.div>
           </motion.div>
         )}
@@ -1527,9 +1319,9 @@ function Chat() {
 
       {/* Settings Modal */}
       <AnimatePresence>
-        {showSettings && selectedEvent && (
+        {showSettings && (
           <motion.div
-            className="fixed inset-0 md:inset-auto md:top-16 md:right-4 bg-black bg-opacity-70 md:bg-transparent backdrop-blur-sm flex items-center justify-center p-4 z-50 overflow-y-auto"
+            className="fixed inset-0 bg-black bg-opacity-70 backdrop-blur-sm flex items-center justify-center p-4 z-50"
             initial="hidden"
             animate="visible"
             exit="exit"
@@ -1539,104 +1331,147 @@ function Chat() {
             <motion.div
               ref={modalRef}
               onClick={(e) => e.stopPropagation()}
-              className="bg-neutral-mediumGray/90 backdrop-blur-lg rounded-2xl max-w-md w-full mx-2 p-4 sm:p-6 relative shadow-2xl border border-neutral-mediumGray/50"
+              className="bg-gray-800/90 backdrop-blur-lg rounded-2xl max-w-md w-full p-6 relative shadow-2xl border border-gray-700/50"
               role="dialog"
               aria-labelledby="settings-modal-title"
             >
               <motion.button
-                type="button"
                 onClick={() => setShowSettings(false)}
-                className="absolute top-3 right-3 sm:top-4 sm:right-4 text-neutral-lightGray hover:text-accent-gold transition-colors z-10"
+                className="absolute top-4 right-4 text-gray-400 hover:text-yellow-400 transition-colors"
                 whileHover={{ scale: 1.2, rotate: 90 }}
                 whileTap={{ scale: 0.9 }}
-                aria-label="Close modal"
+                aria-label="Close settings modal"
               >
                 <FaTimes size={20} />
               </motion.button>
               <motion.h2
                 id="settings-modal-title"
-                className="text-xl sm:text-2xl font-bold text-accent-gold mb-4 sm:mb-6 text-center"
+                className="text-2xl font-bold text-yellow-400 mb-6 text-center"
                 initial={{ opacity: 0, y: -20 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: 0.2 }}
               >
                 Chat Settings
               </motion.h2>
-              <div className="space-y-2">
-                {selectedEvent.organizers?.includes(currentUser?.uid) && (
-                  <>
-                    <motion.button
-                      onClick={toggleAdminsOnlyTalk}
-                      className="w-full flex items-center gap-2 p-2 sm:p-3 bg-neutral-mediumGray/50 rounded-lg text-neutral-lightGray hover:bg-neutral-mediumGray/80 transition-all shadow-md text-sm sm:text-base"
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
-                    >
-                      {adminsOnlyTalk ? <FaUnlock /> : <FaLock />}
-                      <span>{adminsOnlyTalk ? 'Allow All to Talk' : 'Admins Only Talk'}</span>
-                    </motion.button>
-                    <motion.button
-                      onClick={() => {
-                        const userId = prompt('Enter user ID to add as collaborator:', '');
-                        if (userId) addCollaborator(userId);
-                      }}
-                      className="w-full p-2 sm:p-3 bg-neutral-mediumGray/50 rounded-lg text-neutral-lightGray hover:bg-neutral-mediumGray/80 transition-all shadow-md text-sm sm:text-base"
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
-                    >
-                      Add Collaborator
-                    </motion.button>
-                    <motion.button
-                      onClick={() => {
-                        const newName = prompt('Enter new group name:', selectedEvent.title || 'Untitled Event');
-                        if (newName) changeGroupName(newName);
-                      }}
-                      className="w-full p-2 sm:p-3 bg-neutral-mediumGray/50 rounded-lg text-neutral-lightGray hover:bg-neutral-mediumGray/80 transition-all shadow-md text-sm sm:text-base"
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
-                    >
-                      Change Group Name
-                    </motion.button>
-                    <motion.button
-                      onClick={archiveChat}
-                      className="w-full flex items-center gap-2 p-2 sm:p-3 bg-neutral-mediumGray/50 rounded-lg text-neutral-lightGray hover:bg-neutral-mediumGray/80 transition-all shadow-md text-sm sm:text-base"
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
-                    >
-                      <FaArchive /> <span>Archive Chat</span>
-                    </motion.button>
-                  </>
+              <div className="space-y-4">
+                {/* Change Group Name */}
+                {selectedEvent.organizers.includes(currentUser?.uid || '') && (
+                  <div>
+                    <label className="text-sm text-gray-400">Group Name</label>
+                    <div className="flex gap-2 mt-2">
+                      <input
+                        type="text"
+                        defaultValue={selectedEvent.title}
+                        onKeyPress={(e) => {
+                          if (e.key === 'Enter') {
+                            changeGroupName((e.target as HTMLInputElement).value);
+                          }
+                        }}
+                        className="flex-1 p-2 rounded-lg bg-gray-700 text-gray-200 border border-gray-600/50 focus:outline-none focus:ring-2 focus:ring-yellow-400 transition-all text-sm"
+                      />
+                      <motion.button
+                        onClick={() => {
+                          const input = document.querySelector('input[type="text"]') as HTMLInputElement;
+                          changeGroupName(input.value);
+                        }}
+                        className="bg-yellow-400 text-gray-900 p-2 rounded-lg hover:bg-yellow-300 transition-all"
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
+                      >
+                        Update
+                      </motion.button>
+                    </div>
+                  </div>
                 )}
+
+                {/* Add Collaborator */}
+                {selectedEvent.organizers.includes(currentUser?.uid || '') && (
+                  <div>
+                    <label className="text-sm text-gray-400">Add Collaborator (User ID)</label>
+                    <div className="flex gap-2 mt-2">
+                      <input
+                        type="text"
+                        placeholder="Enter user ID..."
+                        onKeyPress={(e) => {
+                          if (e.key === 'Enter') {
+                            addCollaborator((e.target as HTMLInputElement).value);
+                            (e.target as HTMLInputElement).value = '';
+                          }
+                        }}
+                        className="flex-1 p-2 rounded-lg bg-gray-700 text-gray-200 border border-gray-600/50 focus:outline-none focus:ring-2 focus:ring-yellow-400 transition-all text-sm"
+                      />
+                      <motion.button
+                        onClick={() => {
+                          const input = document.querySelector('input[placeholder="Enter user ID..."]') as HTMLInputElement;
+                          addCollaborator(input.value);
+                          input.value = '';
+                        }}
+                        className="bg-yellow-400 text-gray-900 p-2 rounded-lg hover:bg-yellow-300 transition-all"
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
+                      >
+                        <FaUserPlus size={16} />
+                      </motion.button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Admins Only Talk */}
+                {selectedEvent.organizers.includes(currentUser?.uid || '') && (
+                  <motion.button
+                    onClick={toggleAdminsOnlyTalk}
+                    className="w-full flex items-center gap-2 p-3 bg-gray-700/50 rounded-lg text-gray-200 hover:bg-gray-600/50 transition-all shadow-md text-sm"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                  >
+                    {adminsOnlyTalk ? <FaLock /> : <FaUnlock />}
+                    <span>{adminsOnlyTalk ? 'Admins Only' : 'All Members'}</span>
+                  </motion.button>
+                )}
+
+                {/* Archive Chat */}
+                {selectedEvent.organizers.includes(currentUser?.uid || '') && (
+                  <motion.button
+                    onClick={archiveChat}
+                    className="w-full flex items-center gap-2 p-3 bg-gray-700/50 rounded-lg text-gray-200 hover:bg-gray-600/50 transition-all shadow-md text-sm"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                  >
+                    <FaArchive /> <span>Archive Chat</span>
+                  </motion.button>
+                )}
+
+                {/* Delete Chat */}
                 {selectedEvent.userId === currentUser?.uid && (
                   <motion.button
                     onClick={deleteChat}
-                    className="w-full flex items-center gap-2 p-2 sm:p-3 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-all shadow-md text-sm sm:text-base"
+                    className="w-full flex items-center gap-2 p-3 bg-red-600/50 rounded-lg text-gray-200 hover:bg-red-500/50 transition-all shadow-md text-sm"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                   >
                     <FaTrash /> <span>Delete Chat</span>
                   </motion.button>
                 )}
+
+                {/* Leave Group */}
                 <motion.button
                   onClick={leaveGroup}
-                  className="w-full flex items-center gap-2 p-2 sm:p-3 bg-neutral-mediumGray/50 rounded-lg text-neutral-lightGray hover:bg-neutral-mediumGray/80 transition-all shadow-md text-sm sm:text-base"
+                  className="w-full flex items-center gap-2 p-3 bg-gray-700/50 rounded-lg text-gray-200 hover:bg-gray-600/50 transition-all shadow-md text-sm"
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}
                 >
                   <FaSignOutAlt /> <span>Leave Group</span>
                 </motion.button>
               </div>
-              <motion.button
-                onClick={() => setShowSettings(false)}
-                className="w-full bg-accent-gold text-neutral-darkGray p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md mt-4 text-sm sm:text-base"
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-              >
-                Close
-              </motion.button>
             </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Footer (Ensuring visibility on mobile) */}
+      <footer className="bg-gray-800/90 backdrop-blur-lg p-4 text-center text-gray-400 text-sm z-30">
+        <p>&copy; 2025 Eventify. All rights reserved.</p>
+      </footer>
     </div>
   );
 }

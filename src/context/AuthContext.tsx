@@ -1,7 +1,7 @@
 // src/context/AuthContext.tsx
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { onAuthStateChanged, User, getRedirectResult } from 'firebase/auth';
-import { doc, getDoc } from 'firebase/firestore';
+import { onAuthStateChanged, User } from 'firebase/auth';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { auth, loginUser, registerUser, logoutUser, getUserData, db, loginWithGoogle } from '../services/firebase';
 import { toast } from 'react-toastify';
 
@@ -15,6 +15,7 @@ interface AuthContextType {
   userProfile: { name?: string; profilePicture?: string; bio?: string } | null;
   userRole: string | null;
   setUserRole: (role: string) => void;
+  updateUserRole: (role: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -181,6 +182,24 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }
   };
 
+  const updateUserRole = async (role: string) => {
+    if (!currentUser) throw new Error('No user is logged in');
+    setLoading(true);
+    setError(null);
+    try {
+      await setDoc(doc(db, 'users', currentUser.uid), { role }, { merge: true });
+      setUserRole(role);
+      toast.success(`Role updated to ${role}!`);
+    } catch (err: any) {
+      const errorMessage = err.message || 'Failed to update user role.';
+      setError(errorMessage);
+      toast.error(errorMessage);
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <AuthContext.Provider
       value={{
@@ -193,6 +212,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         userProfile,
         userRole,
         setUserRole: handleSetUserRole,
+        updateUserRole,
       }}
     >
       {!loading && children}

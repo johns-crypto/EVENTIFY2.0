@@ -9,6 +9,10 @@ import {
   updateProfile,
   signInWithPopup,
   GoogleAuthProvider,
+  FacebookAuthProvider, // Added FacebookAuthProvider
+  signInWithRedirect,
+  getRedirectResult,
+  sendPasswordResetEmail,
 } from 'firebase/auth';
 import {
   getFirestore,
@@ -31,7 +35,7 @@ import {
   deleteDoc,
 } from 'firebase/firestore';
 import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { EventData, NormalizedEventData, UserData, PostData, BusinessData, ChatData } from '../types';
+import { EventData, NormalizedEventData, UserData, PostData, ChatData } from '../types';
 import { normalizeEventData } from '../utils/normalizeEvent';
 
 const firebaseConfig = {
@@ -51,6 +55,9 @@ export const storage = getStorage(app);
 // Google Sign-In Provider
 const googleProvider = new GoogleAuthProvider();
 
+// Facebook Sign-In Provider
+const facebookProvider = new FacebookAuthProvider(); // Added FacebookAuthProvider instance
+
 // Authentication Functions
 export const loginUser = async (email: string, password: string): Promise<User> => {
   try {
@@ -62,7 +69,7 @@ export const loginUser = async (email: string, password: string): Promise<User> 
   }
 };
 
-export const loginWithGoogle = async (): Promise<User> => {
+export const loginWithGoogle = async (role: string = 'user'): Promise<User> => {
   try {
     const userCredential = await signInWithPopup(auth, googleProvider);
     const user = userCredential.user;
@@ -83,7 +90,7 @@ export const loginWithGoogle = async (): Promise<User> => {
         followers: [],
         following: [],
         notificationsEnabled: true,
-        role: 'user', // Default role for Google Sign-In users
+        role,
       });
     }
 
@@ -103,7 +110,7 @@ export const registerUser = async (
   email: string,
   password: string,
   displayName?: string,
-  role: string = 'user' // Add role parameter with default value
+  role: string = 'user'
 ): Promise<User> => {
   try {
     const userCredential = await createUserWithEmailAndPassword(auth, email, password);
@@ -122,7 +129,7 @@ export const registerUser = async (
       followers: [],
       following: [],
       notificationsEnabled: true,
-      role, // Use the provided role
+      role,
     });
     return user;
   } catch (error: any) {
@@ -353,7 +360,7 @@ export const getUserData = async (userId: string): Promise<UserData | null> => {
         followers: [],
         following: [],
         notificationsEnabled: true,
-        role: 'user', // Add default role
+        role: 'user',
       };
       await setDoc(userDocRef, defaultUserData);
       console.log(`Created default user document for UID: ${userId}`);
@@ -372,7 +379,7 @@ export const getUserData = async (userId: string): Promise<UserData | null> => {
       followers: data.followers || [],
       following: data.following || [],
       notificationsEnabled: data.notificationsEnabled ?? true,
-      role: data.role || 'user', // Ensure role is always present
+      role: data.role || 'user',
     };
   } catch (error: any) {
     console.error('Error fetching user data:', error);
@@ -414,33 +421,6 @@ export const getFeedPosts = async (): Promise<PostData[]> => {
   } catch (error: any) {
     console.error('Error fetching feed posts:', error);
     throw new Error(`Failed to fetch feed posts: ${error.message}`);
-  }
-};
-
-export const getBusinesses = async (): Promise<BusinessData[]> => {
-  try {
-    const businessCol = collection(db, 'businesses');
-    const snapshot = await getDocs(businessCol);
-    if (snapshot.empty) {
-      console.log('No businesses found in Firestore.');
-      return [];
-    }
-    const businessList = snapshot.docs.map((doc) => {
-      const data = doc.data();
-      return {
-        id: doc.id,
-        name: data.name || 'Unnamed Business',
-        category: data.category || 'Venue Provider',
-        description: data.description || '',
-        ownerId: data.ownerId || 'unknown',
-        products: data.products || [],
-        photoURL: data.photoURL || '',
-      } as BusinessData;
-    });
-    return businessList;
-  } catch (error: any) {
-    console.error('Error fetching businesses:', error);
-    throw new Error(`Failed to fetch businesses: ${error.message}`);
   }
 };
 
@@ -487,4 +467,11 @@ export {
   limit,
   startAfter,
   deleteDoc,
+  signInWithRedirect,
+  getRedirectResult,
+  sendPasswordResetEmail,
+  getDoc, // Added getDoc to the exports
+  updateProfile, // Added updateProfile to the exports
+  GoogleAuthProvider, // Added GoogleAuthProvider to the exports
+  FacebookAuthProvider, // Added FacebookAuthProvider to the exports
 };

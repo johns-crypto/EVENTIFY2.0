@@ -2,14 +2,14 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuth } from '../context/AuthContext';
-import { onSnapshot, collection, query, QueryDocumentSnapshot, updateDoc, doc } from 'firebase/firestore';
+import { onSnapshot, collection, query, QueryDocumentSnapshot, updateDoc, doc, getDoc, addDoc } from 'firebase/firestore';
 import { toast } from 'react-toastify';
 import defaultEventImage from '../assets/default-event.jpg';
 import { multiStepCreateEvent } from '../services/eventCreation';
 import { db } from '../services/firebase';
 import { EventData, MultiStepEventData, NormalizedEventData, EventCategory, ServiceData } from '../types';
 import { normalizeEventData } from '../utils/normalizeEvent';
-import { FaPlus, FaCheck, FaTimes, FaEllipsisH, FaComments } from 'react-icons/fa';
+import { FaPlus, FaCheck, FaTimes, FaEllipsisH, FaComments, FaTrash } from 'react-icons/fa';
 import { Link, useNavigate } from 'react-router-dom';
 
 function Events() {
@@ -20,7 +20,7 @@ function Events() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
-  const [menuOpen, setMenuOpen] = useState<string | null>(null); // Track which event's menu is open
+  const [menuOpen, setMenuOpen] = useState<string | null>(null);
   const modalRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -100,7 +100,7 @@ function Events() {
       },
       (err: any) => {
         if (err.code === 'permission-denied') {
-          console.warn('Permission denied when fetching user-specific events. This may be expected for some events.');
+          console.warn('Permission denied when fetching user-specific events.');
         } else {
           console.error('Error fetching user events:', err);
         }
@@ -132,7 +132,6 @@ function Events() {
           return normalizeEventData({ id: doc.id, ...data } as EventData);
         });
 
-        // Filter events based on visibility and accessibility
         const filteredEvents = eventData
           .filter((event) => {
             const eventDate = new Date(event.date || event.createdAt);
@@ -162,36 +161,57 @@ function Events() {
     return () => unsubscribeEvents();
   }, [currentUser, navigate, accessibleEvents]);
 
-  // Handle service selection and add the service to the event
+  // Handle service selection and navigate to business page with filtered category
   const handleServiceSelection = useCallback(
     async (eventId: string, serviceType: 'refreshments' | 'venue' | 'catering') => {
-      navigate(`/business-page?eventId=${eventId}&service=${serviceType}`);
-      setMenuOpen(null);
-
-      // Mock service selection (in a real app, this would happen after selecting a business)
-      const mockService: ServiceData = {
-        type: serviceType,
-        businessId: 'mock-business-id',
-        businessName: 'Mock Business',
+      const categoryMap: { [key: string]: string } = {
+        refreshments: 'Refreshments',
+        venue: 'Venue Provider',
+        catering: 'Catering/Food',
       };
-      await addServiceToEvent(eventId, mockService);
+      const category = categoryMap[serviceType];
+      navigate(`/businesses?eventId=${eventId}&category=${category}`); // Correct path to /businesses
+      setMenuOpen(null);
     },
     [navigate]
   );
 
-  // Add a service to an event (updates Firestore)
-  const addServiceToEvent = useCallback(
-    async (eventId: string, service: ServiceData) => {
+  // Remove a service from an event
+  const removeServiceFromEvent = useCallback(
+    async (eventId: string, eventTitle: string) => {
       try {
         const eventRef = doc(db, 'events', eventId);
-        await updateDoc(eventRef, { service });
-        toast.success(`Service "${service.type}" added from ${service.businessName}`);
+        const eventSnap = await getDoc(eventRef);
+        if (!eventSnap.exists()) {
+          throw new Error('Event not found');
+        }
+        const eventData = eventSnap.data() as EventData;
+        const members = [...(eventData.invitedUsers || []), ...(eventData.organizers || [])].filter(
+          (userId) => userId !== currentUser?.uid // Exclude the current user
+        );
+
+        // Update the event
+        await updateDoc(eventRef, { service: null, products: [] });
+        toast.success('Service removed from event.');
+
+        // Send notification to each event member
+        const notificationPromises = members.map((userId) =>
+          addDoc(collection(db, 'users', userId, 'notifications'), {
+            type: 'event_update',
+            eventId: eventId,
+            eventTitle: eventTitle,
+            message: `Service has been removed from event "${eventTitle}".`,
+            createdAt: new Date().toISOString(),
+            status: 'unread',
+          })
+        );
+        await Promise.all(notificationPromises);
       } catch (err) {
-        toast.error('Failed to add service to event.');
+        toast.error('Failed to remove service from event.');
         console.error(err);
       }
     },
-    []
+    [currentUser]
   );
 
   // Close menu when clicking outside
@@ -348,8 +368,19 @@ function Events() {
                     {event.visibility === 'public' ? 'Public' : 'Private'}
                   </div>
 
-                  {/* Three-Dot Menu */}
-                  <div className="absolute top-2 right-2">
+                  {/* Three-Dot Menu and Add Product Button */}
+                  <div className="absolute top-2 right-2 flex space-x-2">
+                    {currentUser?.uid === event.userId && (
+                      <motion.button
+                        onClick={() => handleServiceSelection(event.id, 'refreshments')}
+                        className="text-neutral-lightGray hover:text-accent-gold transition-colors p-1"
+                        whileHover={{ scale: 1.2 }}
+                        whileTap={{ scale: 0.9 }}
+                        aria-label="Add product to event"
+                      >
+                        <FaPlus size={16} />
+                      </motion.button>
+                    )}
                     <motion.button
                       onClick={() => setMenuOpen(menuOpen === event.id ? null : event.id)}
                       className="text-neutral-lightGray hover:text-accent-gold transition-colors p-1"
@@ -370,19 +401,19 @@ function Events() {
                         >
                           <button
                             onClick={() => handleServiceSelection(event.id, 'refreshments')}
-                            className="block w-full text-left px-4 py-2 text-sm text-neutral-lightGray hover:bg-secondary-deepRed/50 rounded-t-lg"
+                            className="block w-full text-left px-4 py-2 text-sm text-white hover:bg-secondary-deepRed/50 rounded-t-lg"
                           >
                             Add Refreshments
                           </button>
                           <button
                             onClick={() => handleServiceSelection(event.id, 'venue')}
-                            className="block w-full text-left px-4 py-2 text-sm text-neutral-lightGray hover:bg-secondary-deepRed/50"
+                            className="block w-full text-left px-4 py-2 text-sm text-white hover:bg-secondary-deepRed/50"
                           >
                             Book a Venue
                           </button>
                           <button
                             onClick={() => handleServiceSelection(event.id, 'catering')}
-                            className="block w-full text-left px-4 py-2 text-sm text-neutral-lightGray hover:bg-secondary-deepRed/50 rounded-b-lg"
+                            className="block w-full text-left px-4 py-2 text-sm text-white hover:bg-secondary-deepRed/50 rounded-b-lg"
                           >
                             Add Food and Catering
                           </button>
@@ -406,12 +437,25 @@ function Events() {
 
                     {/* Service Provided Tag */}
                     {event.service && (
-                      <Link
-                        to={`/business-profile/${event.service.businessId}`}
-                        className="inline-block mt-2 px-3 py-1 bg-blue-500/80 text-white rounded-full text-xs font-medium hover:bg-blue-600 transition-colors"
-                      >
-                        Service Provided by {event.service.businessName}
-                      </Link>
+                      <div className="mt-2 flex items-center space-x-2">
+                        <Link
+                          to={`/business-profiles/${event.service.businessId}`}
+                          className="inline-block px-3 py-1 bg-blue-500/80 text-white rounded-full text-xs font-medium hover:bg-blue-600 transition-colors"
+                        >
+                          {event.service.type.charAt(0).toUpperCase() + event.service.type.slice(1)} by {event.service.businessName}
+                        </Link>
+                        {currentUser?.uid === event.userId && (
+                          <motion.button
+                            onClick={() => removeServiceFromEvent(event.id, event.title)}
+                            className="text-red-500 hover:text-red-400 transition-colors"
+                            whileHover={{ scale: 1.2 }}
+                            whileTap={{ scale: 0.9 }}
+                            aria-label="Remove service"
+                          >
+                            <FaTrash size={14} />
+                          </motion.button>
+                        )}
+                      </div>
                     )}
 
                     <div className="mt-3 flex space-x-2">
@@ -464,7 +508,7 @@ function Events() {
             <motion.button
               type="button"
               onClick={() => setShowModal(false)}
-              className="absolute top-3 right-3 sm:top-4 sm:right-4 text-neutral-lightGray hover:text-accent-gold transition-colors z-10"
+              className="absolute top-3 right-3 sm:top-4 sm:right-4 text-white hover:text-accent-gold transition-colors z-10"
               whileHover={{ scale: 1.2, rotate: 90 }}
               whileTap={{ scale: 0.9 }}
               aria-label="Close modal"
@@ -490,7 +534,7 @@ function Events() {
                 <div key={stepNum} className="flex flex-col items-center relative z-10">
                   <motion.div
                     className={`w-8 h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center text-xs sm:text-sm font-semibold transition-all duration-300 ${
-                      stepNum <= step ? 'bg-accent-gold text-neutral-darkGray' : 'bg-neutral-mediumGray text-neutral-lightGray'
+                      stepNum <= step ? 'bg-accent-gold text-neutral-darkGray' : 'bg-neutral-mediumGray text-white'
                     }`}
                     initial={{ scale: 0 }}
                     animate={{ scale: 1 }}
@@ -528,33 +572,33 @@ function Events() {
                   transition={{ delay: 0.3 }}
                 >
                   <div>
-                    <label htmlFor="title" className="block text-xs sm:text-sm text-neutral-lightGray mb-1">
+                    <label htmlFor="title" className="block text-xs sm:text-sm text-white mb-1">
                       Event Title
                     </label>
                     <input
                       id="title"
                       value={newEvent.title}
                       onChange={(e) => setNewEvent({ ...newEvent, title: e.target.value })}
-                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-neutral-lightGray border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
+                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-white border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base placeholder-gray-400"
                       placeholder="Enter event title"
                       required
                     />
                   </div>
                   <div>
-                    <label htmlFor="location" className="block text-xs sm:text-sm text-neutral-lightGray mb-1">
+                    <label htmlFor="location" className="block text-xs sm:text-sm text-white mb-1">
                       Location
                     </label>
                     <input
                       id="location"
                       value={newEvent.location}
                       onChange={(e) => setNewEvent({ ...newEvent, location: e.target.value })}
-                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-neutral-lightGray border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
+                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-white border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base placeholder-gray-400"
                       placeholder="Enter location"
                       required
                     />
                   </div>
                   <div>
-                    <label htmlFor="date" className="block text-xs sm:text-sm text-neutral-lightGray mb-1">
+                    <label htmlFor="date" className="block text-xs sm:text-sm text-white mb-1">
                       Date
                     </label>
                     <input
@@ -562,27 +606,27 @@ function Events() {
                       type="date"
                       value={newEvent.date}
                       onChange={(e) => setNewEvent({ ...newEvent, date: e.target.value })}
-                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-neutral-lightGray border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
+                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-white border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
                       required
                       min={new Date().toISOString().split('T')[0]}
                     />
                   </div>
                   <div>
-                    <label htmlFor="visibility" className="block text-xs sm:text-sm text-neutral-lightGray mb-1">
+                    <label htmlFor="visibility" className="block text-xs sm:text-sm text-white mb-1">
                       Visibility
                     </label>
                     <select
                       id="visibility"
                       value={newEvent.visibility}
                       onChange={(e) => setNewEvent({ ...newEvent, visibility: e.target.value as 'public' | 'private' })}
-                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-neutral-lightGray border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
+                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-white border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
                     >
                       <option value="public">Public</option>
                       <option value="private">Private</option>
                     </select>
                   </div>
                   <div>
-                    <label htmlFor="category" className="block text-xs sm:text-sm text-neutral-lightGray mb-1">
+                    <label htmlFor="category" className="block text-xs sm:text-sm text-white mb-1">
                       Category
                     </label>
                     <select
@@ -594,7 +638,7 @@ function Events() {
                           category: e.target.value as EventCategory,
                         })
                       }
-                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-neutral-lightGray border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
+                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-white border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
                     >
                       <option value="General">General</option>
                       <option value="Music">Music</option>
@@ -621,7 +665,7 @@ function Events() {
                   <motion.button
                     type="button"
                     onClick={() => setShowModal(false)}
-                    className="w-full bg-neutral-mediumGray text-neutral-lightGray p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all text-sm sm:text-base"
+                    className="w-full bg-neutral-mediumGray text-white p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all text-sm sm:text-base"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                   >
@@ -636,10 +680,10 @@ function Events() {
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: 0.3 }}
                 >
-                  <p className="text-neutral-lightGray text-center text-sm sm:text-base">Would you like to invite collaborators?</p>
+                  <p className="text-white text-center text-sm sm:text-base">Would you like to invite collaborators?</p>
                   <motion.button
                     onClick={() => handleNextStep()}
-                    className="w-full bg-neutral-mediumGray text-neutral-lightGray p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all shadow-md text-sm sm:text-base"
+                    className="w-full bg-neutral-mediumGray text-white p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all shadow-md text-sm sm:text-base"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                   >
@@ -656,7 +700,7 @@ function Events() {
                     </motion.button>
                   )}
                   <div>
-                    <h3 className="text-xs sm:text-sm text-neutral-lightGray mb-2">Your Followers:</h3>
+                    <h3 className="text-xs sm:text-sm text-white mb-2">Your Followers:</h3>
                     {followers.length > 0 ? (
                       <div className="max-h-32 sm:max-h-40 overflow-y-auto scrollbar-thin scrollbar-thumb-neutral-mediumGray scrollbar-track-neutral-darkGray">
                         {followers.map((followerId: string) => (
@@ -667,7 +711,7 @@ function Events() {
                             animate={{ opacity: 1, y: 0 }}
                             transition={{ delay: 0.1 }}
                           >
-                            <span className="text-xs sm:text-sm text-neutral-lightGray">{followerNames[followerId] || followerId}</span>
+                            <span className="text-xs sm:text-sm text-white">{followerNames[followerId] || followerId}</span>
                             <motion.button
                               onClick={() =>
                                 setNewEvent((prev: MultiStepEventData) => {
@@ -688,10 +732,10 @@ function Events() {
                         ))}
                       </div>
                     ) : (
-                      <p className="text-xs sm:text-sm text-neutral-lightGray text-center">You have no followers yet.</p>
+                      <p className="text-xs sm:text-sm text-white text-center">You have no followers yet.</p>
                     )}
                   </div>
-                  <p className="text-xs sm:text-sm text-neutral-lightGray text-center">
+                  <p className="text-xs sm:text-sm text-white text-center">
                     Selected Organizers: {newEvent.organizers.map((org: string) => followerNames[org] || org).join(', ') || 'None'}
                   </p>
                   <motion.button
@@ -708,7 +752,7 @@ function Events() {
                   <motion.button
                     type="button"
                     onClick={handlePrevStep}
-                    className="w-full bg-neutral-mediumGray text-neutral-lightGray p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all shadow-md text-sm sm:text-base"
+                    className="w-full bg-neutral-mediumGray text-white p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all shadow-md text-sm sm:text-base"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                   >
@@ -717,7 +761,7 @@ function Events() {
                   <motion.button
                     type="button"
                     onClick={() => setShowModal(false)}
-                    className="w-full bg-neutral-mediumGray text-neutral-lightGray p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all text-sm sm:text-base"
+                    className="w-full bg-neutral-mediumGray text-white p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all text-sm sm:text-base"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                   >
@@ -732,7 +776,7 @@ function Events() {
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: 0.3 }}
                 >
-                  <p className="text-neutral-lightGray text-center text-sm sm:text-base">Select an image for your event:</p>
+                  <p className="text-white text-center text-sm sm:text-base">Select an image for your event:</p>
                   {searchedImages.length > 0 ? (
                     <div className="grid grid-cols-3 gap-2 sm:gap-3 max-h-40 sm:max-h-48 overflow-y-auto scrollbar-thin scrollbar-thumb-neutral-mediumGray scrollbar-track-neutral-darkGray">
                       {searchedImages.map((url: string, index: number) => (
@@ -755,17 +799,17 @@ function Events() {
                       ))}
                     </div>
                   ) : (
-                    <p className="text-xs sm:text-sm text-neutral-lightGray text-center">No images found. Please proceed.</p>
+                    <p className="text-xs sm:text-sm text-white text-center">No images found. Please proceed.</p>
                   )}
                   <div>
-                    <label htmlFor="description" className="block text-xs sm:text-sm text-neutral-lightGray mb-1 sm:mb-2">
+                    <label htmlFor="description" className="block text-xs sm:text-sm text-white mb-1 sm:mb-2">
                       Description (optional)
                     </label>
                     <textarea
                       id="description"
                       value={newEvent.description}
                       onChange={(e) => setNewEvent({ ...newEvent, description: e.target.value })}
-                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-neutral-lightGray border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
+                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-white border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base placeholder-gray-400"
                       rows={3}
                       placeholder="Describe your event..."
                     />
@@ -783,7 +827,7 @@ function Events() {
                   <motion.button
                     type="button"
                     onClick={handlePrevStep}
-                    className="w-full bg-neutral-mediumGray text-neutral-lightGray p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all shadow-md text-sm sm:text-base"
+                    className="w-full bg-neutral-mediumGray text-white p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all shadow-md text-sm sm:text-base"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                   >
@@ -792,7 +836,7 @@ function Events() {
                   <motion.button
                     type="button"
                     onClick={() => setShowModal(false)}
-                    className="w-full bg-neutral-mediumGray text-neutral-lightGray p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all text-sm sm:text-base"
+                    className="w-full bg-neutral-mediumGray text-white p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all text-sm sm:text-base"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                   >
@@ -807,7 +851,7 @@ function Events() {
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: 0.3 }}
                 >
-                  <p className="text-neutral-lightGray text-center mb-3 sm:mb-4 text-sm sm:text-base">Preview your event:</p>
+                  <p className="text-white text-center mb-3 sm:mb-4 text-sm sm:text-base">Preview your event:</p>
                   <motion.div
                     className="relative w-full h-72 sm:h-80 bg-neutral-mediumGray/50 rounded-xl overflow-hidden shadow-lg transition-all duration-300"
                     whileTap={{ scale: 0.98 }}
@@ -837,7 +881,7 @@ function Events() {
                   <motion.button
                     type="button"
                     onClick={handlePrevStep}
-                    className="w-full bg-neutral-mediumGray text-neutral-lightGray p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all shadow-md text-sm sm:text-base"
+                    className="w-full bg-neutral-mediumGray text-white p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all shadow-md text-sm sm:text-base"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                   >
@@ -846,7 +890,7 @@ function Events() {
                   <motion.button
                     type="button"
                     onClick={() => setShowModal(false)}
-                    className="w-full bg-neutral-mediumGray text-neutral-lightGray p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all text-sm sm:text-base"
+                    className="w-full bg-neutral-mediumGray text-white p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all text-sm sm:text-base"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                   >

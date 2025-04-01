@@ -1,3 +1,4 @@
+// src/pages/EventDetail.tsx
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
@@ -16,15 +17,15 @@ import {
 } from 'firebase/firestore';
 import { useAuth } from '../context/AuthContext';
 import { db } from '../services/firebase';
-import { EventData, NormalizedEventData, RawComment, Comment, NormalizedComment } from '../types';
+import { EventData, NormalizedEventData, RawComment, NormalizedComment } from '../types';
 import { normalizeEventData, normalizeComment } from '../utils/normalizeEvent';
 import { toast } from 'react-toastify';
 import { FiArrowLeft, FiShare2, FiEdit, FiTrash2, FiSend, FiMoreHorizontal } from 'react-icons/fi';
-import { FaComments } from 'react-icons/fa';
+import { FaComments, FaTrash } from 'react-icons/fa';
 
 function EventDetail() {
   const { eventId } = useParams<{ eventId: string }>();
-  const { currentUser, isModerator } = useAuth();
+  const { currentUser } = useAuth();
   const navigate = useNavigate();
   const [event, setEvent] = useState<NormalizedEventData | null>(null);
   const [creatorName, setCreatorName] = useState('');
@@ -77,17 +78,14 @@ function EventDetail() {
           });
           setCreatorName(eventData.creatorName || 'Unknown User');
 
-          // Check if the user has access to the event
           if (currentUser) {
             const userHasAccess =
               eventData.organizers?.includes(currentUser.uid) ||
               eventData.invitedUsers?.includes(currentUser.uid);
             setHasAccess(userHasAccess);
 
-            // Determine if the user can comment
             const canUserComment =
-              eventData.visibility === 'public' || // Public events: any authenticated user can comment
-              userHasAccess; // Private events: only organizers or invited users can comment
+              eventData.visibility === 'public' || userHasAccess;
             setCanComment(canUserComment);
           } else {
             setHasAccess(false);
@@ -221,6 +219,16 @@ function EventDetail() {
       );
       setEditing(false);
       toast.success('Event updated successfully!');
+
+      // Send notification to event members
+      const notification = {
+        eventId: eventId,
+        eventTitle: formData.title,
+        timestamp: new Date().toISOString(),
+        read: false,
+        message: `Event "${formData.title}" has been updated.`,
+      };
+      await addDoc(collection(db, 'notifications'), notification);
     } catch (error) {
       console.error('Error updating event:', error);
       toast.error('Failed to update event.');
@@ -238,6 +246,16 @@ function EventDetail() {
         await deleteDoc(doc(db, 'events', eventId));
         toast.success('Event deleted successfully!');
         navigate('/');
+
+        // Send notification to event members
+        const notification = {
+          eventId: eventId,
+          eventTitle: event?.title,
+          timestamp: new Date().toISOString(),
+          read: false,
+          message: `Event "${event?.title}" has been deleted.`,
+        };
+        await addDoc(collection(db, 'notifications'), notification);
       } catch (error) {
         console.error('Error deleting event:', error);
         toast.error('Failed to delete event.');
@@ -246,6 +264,30 @@ function EventDetail() {
       }
     }
   };
+
+  const removeServiceFromEvent = useCallback(async () => {
+    if (!eventId || !event) return;
+
+    try {
+      const eventRef = doc(db, 'events', eventId);
+      await updateDoc(eventRef, { service: null, products: [] });
+      setEvent((prev) => (prev ? { ...prev, service: undefined, products: [] } : null));
+      toast.success('Service removed from event.');
+
+      // Send notification to event members
+      const notification = {
+        eventId: eventId,
+        eventTitle: event.title,
+        timestamp: new Date().toISOString(),
+        read: false,
+        message: `Service has been removed from event "${event.title}".`,
+      };
+      await addDoc(collection(db, 'notifications'), notification);
+    } catch (err) {
+      toast.error('Failed to remove service from event.');
+      console.error(err);
+    }
+  }, [eventId, event]);
 
   const handleShare = async () => {
     const shareUrl = `${window.location.origin}/events/${eventId}`;
@@ -275,7 +317,7 @@ function EventDetail() {
       toast.error('Comment cannot be empty.');
       return;
     }
-    if (!eventId) {
+    if (!eventId || !event) {
       toast.error('Event ID is missing.');
       return;
     }
@@ -290,6 +332,24 @@ function EventDetail() {
         createdAt: Timestamp.now(),
         eventId: eventId,
       });
+
+      // Send notifications to the event creator and members
+      const membersToNotify = [...(event.organizers || []), ...(event.invitedUsers || [])];
+      const uniqueMembers = [...new Set(membersToNotify)].filter((uid) => uid !== currentUser.uid);
+
+      for (const memberId of uniqueMembers) {
+        const notification = {
+          userId: memberId,
+          eventId: eventId,
+          eventTitle: event.title,
+          commenter: currentUser.displayName || currentUser.email?.split('@')[0] || 'Anonymous',
+          timestamp: new Date().toISOString(),
+          read: false,
+          message: `${currentUser.displayName || 'Someone'} commented on your event "${event.title}".`,
+        };
+        await addDoc(collection(db, 'notifications'), notification);
+      }
+
       setNewComment('');
       toast.success('Comment added successfully!');
     } catch (error: any) {
@@ -384,7 +444,7 @@ function EventDetail() {
 
   const canDeleteComment = (comment: NormalizedComment) =>
     currentUser &&
-    (currentUser.uid === comment.userId || event?.organizers?.includes(currentUser.uid) || isModerator);
+    (currentUser.uid === comment.userId || event?.organizers?.includes(currentUser.uid));
 
   const canEditComment = (comment: NormalizedComment) => currentUser && currentUser.uid === comment.userId;
 
@@ -429,13 +489,11 @@ function EventDetail() {
 
   return (
     <div className="min-h-screen bg-neutral-darkGray text-neutral-lightGray relative overflow-hidden">
-      {/* Subtle Animated Background */}
       <div className="absolute inset-0 z-0 pointer-events-none">
         <div className="absolute inset-0 bg-gradient-to-r from-accent-gold/10 to-transparent animate-pulse-slow" />
         <div className="absolute inset-0 bg-gradient-to-b from-transparent to-neutral-darkGray/50" />
       </div>
 
-      {/* Back Button */}
       <div className="max-w-5xl mx-auto px-4 sm:px-6 pt-6 relative z-10">
         <motion.button
           onClick={() => navigate(-1)}
@@ -448,7 +506,6 @@ function EventDetail() {
         </motion.button>
       </div>
 
-      {/* Event Details Section */}
       <motion.section
         className="max-w-5xl mx-auto px-4 sm:px-6 py-6 relative z-10"
         initial="hidden"
@@ -456,7 +513,6 @@ function EventDetail() {
         variants={fadeIn}
       >
         <div className="bg-neutral-mediumGray/80 backdrop-blur-lg rounded-2xl overflow-hidden shadow-2xl border border-neutral-mediumGray/50">
-          {/* Event Image with Overlay */}
           <div className="relative w-full h-64 sm:h-80 md:h-96">
             <img
               src={event.image || 'https://via.placeholder.com/600x300?text=Event'}
@@ -486,7 +542,6 @@ function EventDetail() {
             </div>
           </div>
 
-          {/* Event Details */}
           <div className="p-4 sm:p-6 md:p-8">
             {editing ? (
               <form onSubmit={handleEdit} className="space-y-6">
@@ -500,7 +555,7 @@ function EventDetail() {
                     name="title"
                     value={formData.title}
                     onChange={handleInputChange}
-                    className="w-full mt-2 p-3 bg-neutral-mediumGray text-white rounded-lg border border-neutral-lightGray/50 focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm placeholder-neutral-lightGray/70"
+                    className="w-full mt-2 p-3 bg-neutral-mediumGray text-black rounded-lg border border-neutral-lightGray/50 focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm placeholder-gray-400"
                     required
                   />
                 </div>
@@ -514,7 +569,7 @@ function EventDetail() {
                     name="date"
                     value={formData.date}
                     onChange={handleInputChange}
-                    className="w-full mt-2 p-3 bg-neutral-mediumGray text-white rounded-lg border border-neutral-lightGray/50 focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm placeholder-neutral-lightGray/70"
+                    className="w-full mt-2 p-3 bg-neutral-mediumGray text-black rounded-lg border border-neutral-lightGray/50 focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm placeholder-gray-400"
                   />
                 </div>
                 <div>
@@ -527,7 +582,7 @@ function EventDetail() {
                     name="location"
                     value={formData.location}
                     onChange={handleInputChange}
-                    className="w-full mt-2 p-3 bg-neutral-mediumGray text-white rounded-lg border border-neutral-lightGray/50 focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm placeholder-neutral-lightGray/70"
+                    className="w-full mt-2 p-3 bg-neutral-mediumGray text-black rounded-lg border border-neutral-lightGray/50 focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm placeholder-gray-400"
                   />
                 </div>
                 <div className="flex flex-col sm:flex-row sm:justify-end space-y-3 sm:space-y-0 sm:space-x-4 pt-4">
@@ -577,6 +632,33 @@ function EventDetail() {
                   <div>
                     <h2 className="text-lg font-semibold text-accent-gold">Description</h2>
                     <p className="text-sm text-neutral-lightGray mt-2">{event.description}</p>
+                  </div>
+                )}
+                {event.service && (
+                  <div>
+                    <h2 className="text-lg font-semibold text-accent-gold">Service Provided</h2>
+                    <div className="flex items-center space-x-2 mt-2">
+                      <p className="text-sm text-neutral-lightGray">
+                        <strong>{event.service.type.charAt(0).toUpperCase() + event.service.type.slice(1)}</strong> by{' '}
+                        <Link
+                          to={`/business-profile/${event.service.businessId}`}
+                          className="text-accent-gold hover:underline"
+                        >
+                          {event.service.businessName}
+                        </Link>
+                      </p>
+                      {currentUser?.uid === event.userId && (
+                        <motion.button
+                          onClick={removeServiceFromEvent}
+                          className="text-red-500 hover:text-red-400 transition-colors"
+                          whileHover={{ scale: 1.2 }}
+                          whileTap={{ scale: 0.9 }}
+                          aria-label="Remove service"
+                        >
+                          <FaTrash size={14} />
+                        </motion.button>
+                      )}
+                    </div>
                   </div>
                 )}
                 <div className="flex flex-wrap gap-3 pt-4">
@@ -630,7 +712,6 @@ function EventDetail() {
         </div>
       </motion.section>
 
-      {/* Comment Section */}
       <motion.section
         className="max-w-5xl mx-auto px-4 sm:px-6 py-6 relative z-10"
         initial="hidden"
@@ -651,7 +732,7 @@ function EventDetail() {
                     value={newComment}
                     onChange={(e) => setNewComment(e.target.value)}
                     placeholder="Add a comment..."
-                    className="flex-1 p-3 bg-neutral-mediumGray text-black rounded-lg border border-neutral-lightGray/50 focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm resize-none min-h-[80px] placeholder-neutral-lightGray/70"
+                    className="flex-1 p-3 bg-neutral-darkGray text-white rounded-lg border border-neutral-lightGray/50 focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm resize-none min-h-[80px] placeholder-neutral-lightGray/70"
                     required
                     aria-label="Add a comment"
                   />
@@ -674,7 +755,7 @@ function EventDetail() {
             )
           ) : (
             <p className="text-neutral-lightGray text-sm mb-6">
-              Please <a href="/login" className="text-accent-gold hover:underline">log in</a> to add a comment.
+              Please <Link to="/login" className="text-accent-gold hover:underline">log in</Link> to add a comment.
             </p>
           )}
           {comments.length > 0 ? (
@@ -739,7 +820,7 @@ function EventDetail() {
                           <textarea
                             value={editingCommentContent}
                             onChange={(e) => setEditingCommentContent(e.target.value)}
-                            className="w-full p-3 bg-neutral-mediumGray text-black rounded-lg border border-neutral-lightGray/50 focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm resize-none min-h-[80px] placeholder-neutral-lightGray/70"
+                            className="w-full p-3 bg-neutral-darkGray text-white rounded-lg border border-neutral-lightGray/50 focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm resize-none min-h-[80px] placeholder-neutral-lightGray/70"
                             required
                             aria-label="Edit comment"
                           />
@@ -775,7 +856,7 @@ function EventDetail() {
                             value={reportReason}
                             onChange={(e) => setReportReason(e.target.value)}
                             placeholder="Reason for reporting..."
-                            className="w-full p-3 bg-neutral-mediumGray text-black rounded-lg border border-neutral-lightGray/50 focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm resize-none min-h-[80px] placeholder-neutral-lightGray/70"
+                            className="w-full p-3 bg-neutral-darkGray text-white rounded-lg border border-neutral-lightGray/50 focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm resize-none min-h-[80px] placeholder-neutral-lightGray/70"
                             required
                             aria-label="Reason for reporting comment"
                           />
@@ -803,48 +884,32 @@ function EventDetail() {
                   </div>
                 </motion.div>
               ))}
-              {hasMore && (
-                <div ref={loadMoreRef} className="text-center mt-6">
-                  {loadingMore ? (
-                    <p className="text-neutral-lightGray text-sm">Loading more comments...</p>
-                  ) : (
-                    <motion.button
-                      onClick={loadMoreComments}
-                      className="px-6 py-2 bg-accent-gold text-neutral-darkGray rounded-full hover:bg-yellow-300 transition-all text-sm font-medium"
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
-                    >
-                      Load More
-                    </motion.button>
-                  )}
-                </div>
-              )}
+              <div ref={loadMoreRef} className="h-10 flex items-center justify-center">
+                {loadingMore && (
+                  <svg
+                    className="animate-spin h-6 w-6 text-accent-gold"
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                  >
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path
+                      className="opacity-75"
+                      fill="currentColor"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                    />
+                  </svg>
+                )}
+                {!hasMore && comments.length > 0 && (
+                  <p className="text-neutral-lightGray text-sm">No more comments to load.</p>
+                )}
+              </div>
             </div>
           ) : (
             <p className="text-neutral-lightGray text-sm">No comments yet. Be the first to comment!</p>
           )}
         </div>
       </motion.section>
-
-      {/* Floating Action Button for Mobile */}
-      {currentUser && canComment && (
-        <motion.div
-          className="fixed bottom-6 right-6 z-20 sm:hidden"
-          initial={{ opacity: 0, scale: 0 }}
-          animate={{ opacity: 1, scale: 1 }}
-          transition={{ duration: 0.3 }}
-        >
-          <motion.button
-            onClick={() => document.getElementById('new-comment')?.focus()}
-            className="w-14 h-14 bg-accent-gold text-neutral-darkGray rounded-full flex items-center justify-center shadow-lg"
-            whileHover={{ scale: 1.1 }}
-            whileTap={{ scale: 0.9 }}
-            aria-label="Add a comment"
-          >
-            <FiSend className="w-6 h-6" />
-          </motion.button>
-        </motion.div>
-      )}
     </div>
   );
 }

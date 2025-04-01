@@ -16,24 +16,23 @@ interface Business {
 }
 
 interface LazyImageProps {
-  src: string | undefined; // Allow undefined
+  src: string | undefined;
   alt: string;
   className: string;
-  fallbackSrc?: string; // Optional fallback image
+  fallbackSrc?: string;
 }
 
 const LazyImage: React.FC<LazyImageProps> = ({
   src,
   alt,
   className,
-  fallbackSrc = '/path/to/fallback-image.jpg', // Provide a default fallback image
+  fallbackSrc = '/path/to/fallback-image.jpg',
 }) => {
   const [isLoaded, setIsLoaded] = useState(false);
   const [hasError, setHasError] = useState(false);
   const imgRef = useRef<HTMLImageElement>(null);
 
   useEffect(() => {
-    // Fallback to immediate load if IntersectionObserver is not supported
     if (!('IntersectionObserver' in window)) {
       setIsLoaded(true);
       return;
@@ -64,7 +63,6 @@ const LazyImage: React.FC<LazyImageProps> = ({
     setHasError(true);
   };
 
-  // Use fallbackSrc if src is undefined or if there's an error
   const imageSrc = hasError || !src || !isLoaded ? fallbackSrc : src;
 
   return (
@@ -81,12 +79,15 @@ const LazyImage: React.FC<LazyImageProps> = ({
 };
 
 interface BusinessDetailsModalProps {
+  isOpen: boolean; // Added isOpen prop
   business: Business;
   onClose: () => void;
   onViewFullProfile: () => void;
 }
 
-function BusinessDetailsModal({ business, onClose, onViewFullProfile }: BusinessDetailsModalProps) {
+function BusinessDetailsModal({ isOpen, business, onClose, onViewFullProfile }: BusinessDetailsModalProps) {
+  if (!isOpen) return null;
+
   return (
     <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 p-4">
       <motion.div
@@ -137,7 +138,7 @@ function BusinessDetailsModal({ business, onClose, onViewFullProfile }: Business
                           src={product.imageUrl}
                           alt={product.name}
                           className="w-10 h-10 sm:w-12 sm:h-12 object-cover rounded-lg"
-                          fallbackSrc="/path/to/fallback-image.jpg" // Ensure this path is correct
+                          fallbackSrc="/path/to/fallback-image.jpg"
                         />
                       )}
                       <div>

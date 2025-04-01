@@ -11,6 +11,7 @@ const Home = lazy(() => import('./pages/Home'));
 const Events = lazy(() => import('./pages/Events'));
 const Businesses = lazy(() => import('./pages/Businesses'));
 const BusinessProfile = lazy(() => import('./pages/BusinessProfiles'));
+const ServiceProviderProfile = lazy(() => import('./pages/ServiceProviderProfile'));
 const Profile = lazy(() => import('./pages/Profile'));
 const Register = lazy(() => import('./pages/Register'));
 const Login = lazy(() => import('./pages/Login'));
@@ -22,7 +23,7 @@ const About = lazy(() => import('./pages/About'));
 const ForgotPassword = lazy(() => import('./pages/ForgotPassword'));
 const Settings = lazy(() => import('./pages/Settings'));
 const Chat = lazy(() => import('./pages/Chat'));
-const MediaEditor = lazy(() => import('./pages/MediaEditor'));
+const MediaEditor = lazy(() => import('./components/MediaEditor.tsx'));
 const Notifications = lazy(() => import('./pages/Notifications'));
 const Search = lazy(() => import('./pages/Search.tsx'));
 
@@ -96,6 +97,7 @@ function App() {
                   <Route path="/businesses" element={<Businesses />} />
                   <Route path="/business-profiles" element={<BusinessProfile />} />
                   <Route path="/business-profiles/:id" element={<BusinessProfile />} />
+                  <Route path="/service-provider/:providerId" element={<ServiceProviderProfile />} />
                   <Route path="/profile" element={<Profile />} />
                   <Route path="/register" element={<Register />} />
                   <Route path="/business-register" element={<BusinessRegister />} />

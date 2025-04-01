@@ -2,30 +2,19 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { collection, query, getDocs } from 'firebase/firestore';
-import { db } from '../services/firebase';
+import { getBusinesses, getBusinessById, BusinessData, updateBusiness, deleteBusiness } from '../services/businessService';
 import { motion } from 'framer-motion';
-import { FaSearch, FaFilter, FaPlus, FaBriefcase } from 'react-icons/fa';
+import { FaSearch, FaFilter, FaPlus, FaBriefcase, FaUser, FaSignOutAlt } from 'react-icons/fa';
 import { toast } from 'react-toastify';
 import BusinessProfileDetails from './BusinessProfileDetails';
 import BusinessFormModal from './BusinessFormModal';
 import BusinessDetailsModal from './BusinessDetailsModal';
-import LazyImage from '../components/LazyImage.tsx'; 
+import LazyImage from '../components/LazyImage.tsx';
 
-interface Business {
-  id: string;
-  name: string;
-  services: string[];
-  description: string;
-  contact: { phoneNumber: string; email?: string };
-  location: string;
-  imageUrl?: string;
-  ownerId: string;
-  products: { name: string; description: string; imageUrl?: string; inStock: boolean; category?: string }[];
-}
+interface Business extends BusinessData {}
 
 function BusinessProfiles() {
-  const { currentUser, userRole } = useAuth();
+  const { currentUser, userRole, logout } = useAuth();
   const navigate = useNavigate();
   const { id: businessId } = useParams<{ id: string }>();
   const [businesses, setBusinesses] = useState<Business[]>([]);
@@ -55,33 +44,13 @@ function BusinessProfiles() {
       setLoading(true);
       setError(null);
       try {
-        const businessesQuery = query(collection(db, 'businesses'));
-        const querySnapshot = await getDocs(businessesQuery);
-        const businessData = querySnapshot.docs
-          .map((doc) => {
-            const data = doc.data();
-            const contact = {
-              phoneNumber: data.contact?.phoneNumber || '',
-              email: data.contact?.email || '',
-            };
-            return {
-              id: doc.id,
-              name: data.name,
-              services: data.services || (data.category ? [data.category] : []),
-              description: data.description || '',
-              contact,
-              location: data.location || '',
-              imageUrl: data.imageUrl,
-              ownerId: data.ownerId,
-              products: data.products || [],
-            } as Business;
-          })
-          .filter((business: Business) => business.ownerId === currentUser.uid || userRole === 'user');
+        // Fetch businesses (all businesses for regular users, owned businesses for service providers)
+        const businessData = await getBusinesses(currentUser.uid, userRole || 'user');
         setBusinesses(businessData);
         setFilteredBusinesses(businessData);
 
         if (businessId) {
-          const business = businessData.find((b) => b.id === businessId);
+          const business = await getBusinessById(businessId);
           if (business) {
             setSelectedBusiness(business);
           } else {
@@ -113,6 +82,49 @@ function BusinessProfiles() {
     }
     setFilteredBusinesses(filtered);
     setCurrentPage(1);
+  };
+
+  const handleEditBusiness = (business: Business) => {
+    setEditingBusiness(business);
+    setShowModal(true);
+  };
+
+  const handleDeleteBusiness = async (businessId: string) => {
+    if (window.confirm('Are you sure you want to delete this business?')) {
+      try {
+        await deleteBusiness(businessId);
+        setBusinesses(businesses.filter((business) => business.id !== businessId));
+        setFilteredBusinesses(filteredBusinesses.filter((business) => business.id !== businessId));
+        toast.success('Business deleted successfully.');
+      } catch (err: any) {
+        toast.error(`Failed to delete business: ${err.message}`);
+      }
+    }
+  };
+
+  const handleSaveBusiness = async (businessData: Business) => {
+    try {
+      if (editingBusiness) {
+        await updateBusiness(editingBusiness.id, businessData);
+        setBusinesses(businesses.map((b) => (b.id === editingBusiness.id ? { ...b, ...businessData } : b)));
+        setFilteredBusinesses(filteredBusinesses.map((b) => (b.id === editingBusiness.id ? { ...b, ...businessData } : b)));
+        toast.success('Business updated successfully.');
+      }
+      setShowModal(false);
+      setEditingBusiness(null);
+    } catch (err: any) {
+      toast.error(`Failed to save business: ${err.message}`);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await logout();
+      toast.success('Logged out successfully.');
+      navigate('/login');
+    } catch (err: any) {
+      toast.error('Failed to log out: ' + err.message);
+    }
   };
 
   const paginatedBusinesses = useMemo(() => {
@@ -170,17 +182,25 @@ function BusinessProfiles() {
         variants={stagger}
       >
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 sm:mb-8 gap-4">
-          <h2 className="text-xl sm:text-2xl lg:text-3xl font-bold text-yellow-400">My Business Profiles</h2>
+          <h2 className="text-xl sm:text-2xl lg:text-3xl font-bold text-yellow-400">Business Profiles</h2>
           {userRole === 'serviceProvider' ? (
-            <button
-              onClick={() => {
-                setEditingBusiness(null);
-                setShowModal(true);
-              }}
-              className="w-full sm:w-auto px-4 py-2 bg-gradient-to-r from-blue-600 to-blue-700 text-white rounded-full hover:from-blue-500 hover:to-blue-600 transition-all shadow-sm text-sm sm:text-base"
-            >
-              <FaPlus className="inline mr-2" /> Create New Business
-            </button>
+            <div className="flex gap-3 w-full sm:w-auto">
+              <button
+                onClick={() => {
+                  setEditingBusiness(null);
+                  setShowModal(true);
+                }}
+                className="w-full sm:w-auto px-4 py-2 bg-gradient-to-r from-blue-600 to-blue-700 text-white rounded-full hover:from-blue-500 hover:to-blue-600 transition-all shadow-sm text-sm sm:text-base flex items-center justify-center"
+              >
+                <FaPlus className="inline mr-2" /> Create New Business
+              </button>
+              <button
+                onClick={handleLogout}
+                className="w-full sm:w-auto px-4 py-2 bg-gradient-to-r from-red-600 to-red-700 text-white rounded-full hover:from-red-500 hover:to-red-600 transition-all shadow-sm text-sm sm:text-base flex items-center justify-center"
+              >
+                <FaSignOutAlt className="inline mr-2" /> Logout
+              </button>
+            </div>
           ) : (
             <div className="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
               <Link
@@ -264,16 +284,40 @@ function BusinessProfiles() {
                     <h3 className="text-lg sm:text-xl lg:text-2xl font-semibold text-white">{business.name}</h3>
                     <p className="text-gray-300 text-xs sm:text-sm line-clamp-2">{business.description}</p>
                   </div>
-                  <div className="absolute bottom-3 sm:bottom-4 left-3 sm:left-4 right-3 sm:right-4 flex justify-between items-center">
-                    <button
-                      onClick={() => {
-                        setSelectedBusinessForDetails(business);
-                        setShowDetailsModal(true);
-                      }}
-                      className="px-3 sm:px-4 py-1 sm:py-2 bg-gradient-to-r from-blue-600 to-blue-700 text-white rounded-full hover:from-blue-500 hover:to-blue-600 transition-all shadow-sm hover:shadow-md text-sm sm:text-base"
-                    >
-                      View Details
-                    </button>
+                  <div className="absolute bottom-3 sm:bottom-4 left-3 sm:left-4 right-3 sm:right-4 flex justify-between items-center flex-wrap gap-2">
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => {
+                          setSelectedBusinessForDetails(business);
+                          setShowDetailsModal(true);
+                        }}
+                        className="px-3 sm:px-4 py-1 sm:py-2 bg-gradient-to-r from-blue-600 to-blue-700 text-white rounded-full hover:from-blue-500 hover:to-blue-600 transition-all shadow-sm hover:shadow-md text-sm sm:text-base"
+                      >
+                        View Details
+                      </button>
+                      <Link
+                        to={`/service-provider/${business.ownerId}`}
+                        className="px-3 sm:px-4 py-1 sm:py-2 bg-gradient-to-r from-purple-600 to-purple-700 text-white rounded-full hover:from-purple-500 hover:to-purple-600 transition-all shadow-sm hover:shadow-md text-sm sm:text-base flex items-center"
+                      >
+                        <FaUser className="mr-1" size={14} /> Provider
+                      </Link>
+                    </div>
+                    {userRole === 'serviceProvider' && business.ownerId === currentUser?.uid && (
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => handleEditBusiness(business)}
+                          className="px-3 sm:px-4 py-1 sm:py-2 bg-gradient-to-r from-yellow-500 to-yellow-600 text-white rounded-full hover:from-yellow-400 hover:to-yellow-500 transition-all shadow-sm hover:shadow-md text-sm sm:text-base"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => handleDeleteBusiness(business.id)}
+                          className="px-3 sm:px-4 py-1 sm:py-2 bg-gradient-to-r from-red-600 to-red-700 text-white rounded-full hover:from-red-500 hover:to-red-600 transition-all shadow-sm hover:shadow-md text-sm sm:text-base"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </motion.div>
               ))}
@@ -301,54 +345,44 @@ function BusinessProfiles() {
             )}
           </>
         ) : (
-          <div className="text-center text-gray-400 text-sm sm:text-lg">
-            <p>No businesses found.</p>
-            {userRole === 'serviceProvider' ? (
-              <p>Create a new one to get started!</p>
-            ) : (
-              <p>
-                Please{' '}
-                <Link to="/business-login" className="text-yellow-400 hover:underline">
-                  login
-                </Link>{' '}
-                or{' '}
-                <Link to="/business-register" className="text-yellow-400 hover:underline">
-                  register as a service provider
-                </Link>{' '}
-                to create a business.
-              </p>
+          <div className="text-center py-10">
+            <p className="text-gray-400 text-lg sm:text-xl">
+              {userRole === 'serviceProvider'
+                ? 'You have not created any business profiles yet.'
+                : 'No business profiles available.'}
+            </p>
+            {userRole === 'serviceProvider' && (
+              <button
+                onClick={() => setShowModal(true)}
+                className="mt-4 px-4 sm:px-6 py-2 sm:py-3 bg-gradient-to-r from-blue-600 to-blue-700 text-white rounded-full hover:from-blue-500 hover:to-blue-600 transition-all shadow-sm hover:shadow-md text-sm sm:text-base"
+              >
+                <FaPlus className="inline mr-2" /> Create Your First Business
+              </button>
             )}
           </div>
         )}
       </motion.div>
 
-      {showDetailsModal && selectedBusinessForDetails && (
-        <BusinessDetailsModal
-          business={selectedBusinessForDetails}
+      {showModal && (
+        <BusinessFormModal
+          isOpen={showModal}
           onClose={() => {
-            setShowDetailsModal(false);
-            setSelectedBusinessForDetails(null);
+            setShowModal(false);
+            setEditingBusiness(null);
           }}
-          onViewFullProfile={() => navigate(`/business-profiles/${selectedBusinessForDetails.id}`)}
+          onSave={handleSaveBusiness}
+          editingBusiness={editingBusiness}
         />
       )}
 
-      {showModal && (
-        <BusinessFormModal
-          editingBusiness={editingBusiness}
-          onClose={() => setShowModal(false)}
-          onSave={(updatedBusiness) => {
-            setBusinesses((prev) =>
-              editingBusiness
-                ? prev.map((b) => (b.id === updatedBusiness.id ? updatedBusiness : b))
-                : [...prev, updatedBusiness]
-            );
-            setFilteredBusinesses((prev) =>
-              editingBusiness
-                ? prev.map((b) => (b.id === updatedBusiness.id ? updatedBusiness : b))
-                : [...prev, updatedBusiness]
-            );
-            setShowModal(false);
+      {showDetailsModal && selectedBusinessForDetails && (
+        <BusinessDetailsModal
+          isOpen={showDetailsModal}
+          onClose={() => setShowDetailsModal(false)}
+          business={selectedBusinessForDetails}
+          onViewFullProfile={() => {
+            setShowDetailsModal(false);
+            navigate(`/business-profiles/${selectedBusinessForDetails.id}`);
           }}
         />
       )}

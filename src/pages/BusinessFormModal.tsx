@@ -29,6 +29,7 @@ interface FormErrors {
 }
 
 interface BusinessFormModalProps {
+  isOpen: boolean;
   editingBusiness: Business | null;
   onClose: () => void;
   onSave: (business: Business) => void;
@@ -48,7 +49,7 @@ const LazyImage = ({ src, alt, className }: { src: string; alt: string; classNam
   );
 };
 
-function BusinessFormModal({ editingBusiness, onClose, onSave }: BusinessFormModalProps) {
+function BusinessFormModal({ isOpen, editingBusiness, onClose, onSave }: BusinessFormModalProps) {
   const { currentUser, userRole } = useAuth();
   const [formData, setFormData] = useState({
     name: editingBusiness?.name || '',
@@ -169,6 +170,8 @@ function BusinessFormModal({ editingBusiness, onClose, onSave }: BusinessFormMod
   };
 
   const fadeIn = { hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 0, transition: { duration: 0.6 } } };
+
+  if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 p-4">

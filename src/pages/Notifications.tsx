@@ -1,22 +1,23 @@
+// src/pages/Notifications.tsx
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { onSnapshot, collection, query, where, updateDoc, doc, arrayUnion, arrayRemove } from 'firebase/firestore';
+import { onSnapshot, collection, query, updateDoc, doc, arrayUnion, arrayRemove, addDoc } from 'firebase/firestore';
 import { toast } from 'react-toastify';
 import { motion } from 'framer-motion';
 import { db } from '../services/firebase';
-import { FaCheck, FaTimes, FaArrowLeft, FaBell } from 'react-icons/fa';
+import { FaCheck, FaTimes, FaArrowLeft, FaBell, FaInfoCircle } from 'react-icons/fa';
 
 interface NotificationData {
   id: string;
-  type: 'join_request';
+  type: 'join_request' | 'join_response' | 'event_update';
   eventId: string;
-  userId: string;
+  userId?: string; // For join_request
   eventTitle: string;
-  userName: string;
+  userName?: string; // For join_request
   message: string;
   createdAt: string;
-  status: 'pending' | 'approved' | 'denied';
+  status: 'pending' | 'approved' | 'denied' | 'unread';
 }
 
 function Notifications() {
@@ -37,12 +38,8 @@ function Notifications() {
     setLoading(true);
     setError(null);
 
-    // Query the user's notifications subcollection
-    const q = query(
-      collection(db, 'users', currentUser.uid, 'notifications'),
-      where('type', '==', 'join_request'),
-      where('status', '==', 'pending')
-    );
+    // Query all notifications for the user
+    const q = query(collection(db, 'users', currentUser.uid, 'notifications'));
 
     const unsubscribe = onSnapshot(
       q,
@@ -71,12 +68,25 @@ function Notifications() {
       const eventRef = doc(db, 'events', notification.eventId);
       const notificationRef = doc(db, 'users', currentUser!.uid, 'notifications', notification.id);
 
+      // Update the event
       await updateDoc(eventRef, {
         invitedUsers: arrayUnion(notification.userId),
         pendingRequests: arrayRemove(notification.userId),
       });
 
+      // Update the current user's notification
       await updateDoc(notificationRef, { status: 'approved' });
+
+      // Create a notification for the requesting user
+      const userNotificationRef = collection(db, 'users', notification.userId!, 'notifications');
+      await addDoc(userNotificationRef, {
+        type: 'join_response',
+        eventId: notification.eventId,
+        eventTitle: notification.eventTitle,
+        message: `Your request to join "${notification.eventTitle}" has been approved!`,
+        createdAt: new Date().toISOString(),
+        status: 'approved',
+      });
 
       toast.success(`${notification.userName} has been approved to join ${notification.eventTitle}.`);
     } catch (err: any) {
@@ -89,11 +99,24 @@ function Notifications() {
       const eventRef = doc(db, 'events', notification.eventId);
       const notificationRef = doc(db, 'users', currentUser!.uid, 'notifications', notification.id);
 
+      // Update the event
       await updateDoc(eventRef, {
         pendingRequests: arrayRemove(notification.userId),
       });
 
+      // Update the current user's notification
       await updateDoc(notificationRef, { status: 'denied' });
+
+      // Create a notification for the requesting user
+      const userNotificationRef = collection(db, 'users', notification.userId!, 'notifications');
+      await addDoc(userNotificationRef, {
+        type: 'join_response',
+        eventId: notification.eventId,
+        eventTitle: notification.eventTitle,
+        message: `Your request to join "${notification.eventTitle}" has been denied.`,
+        createdAt: new Date().toISOString(),
+        status: 'denied',
+      });
 
       toast.success(`${notification.userName}'s request to join ${notification.eventTitle} has been denied.`);
     } catch (err: any) {
@@ -213,36 +236,52 @@ function Notifications() {
                   <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                     {/* Notification Details */}
                     <div className="flex-1">
-                      <p className="text-sm sm:text-base text-neutral-lightGray">
-                        {notification.message}
-                      </p>
+                      <div className="flex items-center gap-2">
+                        {notification.type === 'join_request' && (
+                          <FaBell className="text-accent-gold" />
+                        )}
+                        {notification.type === 'join_response' && (
+                          <FaInfoCircle className="text-blue-500" />
+                        )}
+                        {notification.type === 'event_update' && (
+                          <FaInfoCircle className="text-yellow-500" />
+                        )}
+                        <p
+                          className="text-sm sm:text-base text-neutral-lightGray cursor-pointer hover:text-accent-gold transition-colors"
+                          onClick={() => navigate(`/events/${notification.eventId}`)}
+                        >
+                          {notification.message}
+                        </p>
+                      </div>
                       <p className="text-xs sm:text-sm text-gray-400 mt-1">
                         {new Date(notification.createdAt).toLocaleString()}
                       </p>
                     </div>
-                    {/* Action Buttons */}
-                    <div className="flex gap-2 sm:gap-3">
-                      <motion.button
-                        onClick={() => handleApprove(notification)}
-                        className="flex items-center bg-green-600 text-white px-3 sm:px-4 py-2 rounded-lg hover:bg-green-500 transition-all text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-green-500 shadow-md"
-                        whileHover={{ scale: 1.05 }}
-                        whileTap={{ scale: 0.95 }}
-                        aria-label={`Approve ${notification.userName}'s request to join ${notification.eventTitle}`}
-                      >
-                        <FaCheck className="mr-1 sm:mr-2" />
-                        Approve
-                      </motion.button>
-                      <motion.button
-                        onClick={() => handleDeny(notification)}
-                        className="flex items-center bg-red-500 text-white px-3 sm:px-4 py-2 rounded-lg hover:bg-red-600 transition-all text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-red-500 shadow-md"
-                        whileHover={{ scale: 1.05 }}
-                        whileTap={{ scale: 0.95 }}
-                        aria-label={`Deny ${notification.userName}'s request to join ${notification.eventTitle}`}
-                      >
-                        <FaTimes className="mr-1 sm:mr-2" />
-                        Deny
-                      </motion.button>
-                    </div>
+                    {/* Action Buttons (only for join_request) */}
+                    {notification.type === 'join_request' && notification.status === 'pending' && (
+                      <div className="flex gap-2 sm:gap-3">
+                        <motion.button
+                          onClick={() => handleApprove(notification)}
+                          className="flex items-center bg-green-600 text-white px-3 sm:px-4 py-2 rounded-lg hover:bg-green-500 transition-all text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-green-500 shadow-md"
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
+                          aria-label={`Approve ${notification.userName}'s request to join ${notification.eventTitle}`}
+                        >
+                          <FaCheck className="mr-1 sm:mr-2" />
+                          Approve
+                        </motion.button>
+                        <motion.button
+                          onClick={() => handleDeny(notification)}
+                          className="flex items-center bg-red-500 text-white px-3 sm:px-4 py-2 rounded-lg hover:bg-red-600 transition-all text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-red-500 shadow-md"
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
+                          aria-label={`Deny ${notification.userName}'s request to join ${notification.eventTitle}`}
+                        >
+                          <FaTimes className="mr-1 sm:mr-2" />
+                          Deny
+                        </motion.button>
+                      </div>
+                    )}
                   </div>
                 </motion.div>
               ))}
@@ -255,7 +294,7 @@ function Notifications() {
               transition={{ duration: 0.5 }}
             >
               <FaBell className="text-accent-gold text-3xl sm:text-4xl mx-auto mb-4" />
-              <p className="text-sm sm:text-base">No pending join requests at the moment.</p>
+              <p className="text-sm sm:text-base">No notifications at the moment.</p>
               <motion.button
                 onClick={() => navigate('/')}
                 className="mt-4 bg-accent-gold text-neutral-darkGray px-5 py-2 rounded-full hover:bg-yellow-500 transition-all text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-accent-gold"
