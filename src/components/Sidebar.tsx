@@ -1,6 +1,6 @@
 // src/components/Sidebar.tsx
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Link, useNavigate, Outlet, useLocation } from 'react-router-dom';
+import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { toast } from 'react-toastify';
 import {
@@ -23,6 +23,7 @@ import { MdBusiness } from 'react-icons/md';
 import { motion, AnimatePresence } from 'framer-motion';
 import { onSnapshot, query, where, collection } from 'firebase/firestore';
 import { db } from '../services/firebase';
+import { Tooltip } from 'react-tooltip';
 
 // Constants for routes
 const ROUTES = {
@@ -41,7 +42,7 @@ const ROUTES = {
 
 // Interface for props
 interface SidebarProps {
-  children: React.ReactNode; // Add children prop
+  children: React.ReactNode;
 }
 
 // NavLink Component
@@ -62,26 +63,31 @@ const NavLink = ({
   notificationCount?: number;
   isExpanded: boolean;
 }) => (
-  <Link
-    to={to}
-    className={`flex items-center p-2 transition-colors rounded-lg mx-1 my-1 focus:outline-none focus:ring-2 focus:ring-accent-gold ${
-      isActive ? 'bg-secondary-deepRed/70' : 'hover:bg-secondary-deepRed/50'
-    }`}
-    onClick={onClick}
-    aria-label={`Go to ${label} page${notificationCount > 0 ? `, ${notificationCount} new notifications` : ''}`}
-  >
-    <Icon size={16} className={`text-accent-gold ${isExpanded ? '' : 'mx-auto'}`} />
-    {isExpanded && <span className="ml-4 text-neutral-lightGray">{label}</span>}
-    {notificationCount > 0 && (
-      <motion.span
-        className="absolute top-1 right-1 bg-secondary-deepRed text-white text-xs rounded-full h-5 w-5 flex items-center justify-center"
-        animate={{ scale: [1, 1.2, 1] }}
-        transition={{ repeat: Infinity, duration: 1.5 }}
-      >
-        {notificationCount}
-      </motion.span>
-    )}
-  </Link>
+  <div className="relative">
+    <Link
+      to={to}
+      className={`flex items-center p-2 transition-colors rounded-lg mx-1 my-1 focus:outline-none focus:ring-2 focus:ring-accent-gold ${
+        isActive ? 'bg-secondary-deepRed/70' : 'hover:bg-secondary-deepRed/50'
+      }`}
+      onClick={onClick}
+      aria-label={`Go to ${label} page${notificationCount > 0 ? `, ${notificationCount} new notifications` : ''}`}
+      data-tooltip-id={`nav-tooltip-${label}`}
+      data-tooltip-content={label}
+    >
+      <Icon size={16} className={`text-accent-gold ${isExpanded ? '' : 'mx-auto'}`} />
+      {isExpanded && <span className="ml-4 text-neutral-lightGray">{label}</span>}
+      {notificationCount > 0 && (
+        <motion.span
+          className="absolute top-1 right-1 bg-secondary-deepRed text-white text-xs rounded-full h-5 w-5 flex items-center justify-center"
+          animate={{ scale: [1, 1.2, 1] }}
+          transition={{ repeat: Infinity, duration: 1.5 }}
+        >
+          {notificationCount}
+        </motion.span>
+      )}
+    </Link>
+    {!isExpanded && <Tooltip id={`nav-tooltip-${label}`} place="right" />}
+  </div>
 );
 
 // MobileNavLink Component
@@ -176,7 +182,7 @@ const HamburgerMenuModal = ({
             navigate(ROUTES.MEDIA_EDITOR);
             onClose();
           }}
-          className="w-full flex items-center p-2 text-neutral-lightGray hover:bg-secondary-deepRed/50 rounded-lg focus:outline-none focus:ring-2 focus:ring-accent-gold"
+          className="w-full flex items-center p-2 text-neutral/50 rounded-lg focus:outline-none focus:ring-2 focus:ring-accent-gold"
           aria-label="Go to Media Editor page"
         >
           <FaImage size={16} className="text-accent-gold mr-3" />
@@ -308,13 +314,7 @@ function Sidebar({ children }: SidebarProps) {
       { to: ROUTES.FEED, icon: FaRss, label: 'Feed' },
       { to: ROUTES.EVENTS, icon: FaCalendarAlt, label: 'Events' },
       { to: ROUTES.BUSINESSES, icon: MdBusiness, label: 'Businesses' },
-      { to: ROUTES.BUSINESS_PROFILES, icon: FaBuilding, label: 'Business Profiles' },
-      {
-        to: ROUTES.NOTIFICATIONS,
-        icon: FaBell,
-        label: 'Notifications',
-        notificationCount,
-      },
+      { to: ROUTES.NOTIFICATIONS, icon: FaBell, label: 'Notifications', notificationCount },
       { to: ROUTES.PROFILE, icon: FaUser, label: 'Profile' },
     ],
     [notificationCount]
@@ -322,6 +322,27 @@ function Sidebar({ children }: SidebarProps) {
 
   return (
     <div className="min-h-screen bg-neutral-darkGray text-neutral-lightGray flex flex-col relative">
+      {/* Mobile Top Navigation */}
+      <motion.div
+        className="md:hidden fixed top-0 left-0 w-full bg-neutral-mediumGray/50 backdrop-blur-lg border-b border-neutral-mediumGray/50 z-40 shadow-md flex items-center justify-between px-4 py-3"
+        initial={{ opacity: 0, y: -50 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5 }}
+      >
+        <div className="text-xl font-bold text-accent-gold">Eventify</div>
+        <motion.div
+          whileTap={{ scale: 0.9 }}
+          className="relative flex items-center justify-center p-2 rounded-full focus:outline-none focus:ring-2 focus:ring-accent-gold text-neutral-lightGray hover:text-accent-gold"
+          onClick={() => setIsHamburgerOpen(true)}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => handleKeyDown(e, () => setIsHamburgerOpen(true))}
+          aria-label="Open more options"
+        >
+          <FaBars size={24} />
+        </motion.div>
+      </motion.div>
+
       {/* Desktop Sidebar */}
       <motion.div
         className={`hidden md:flex fixed top-4 left-4 bg-neutral-mediumGray/50 backdrop-blur-lg transition-all duration-300 ${
@@ -376,10 +397,13 @@ function Sidebar({ children }: SidebarProps) {
               tabIndex={0}
               role="button"
               aria-label={isSearchOpen ? 'Close search' : 'Open search'}
+              data-tooltip-id="nav-tooltip-search"
+              data-tooltip-content="Search"
             >
               <FaSearch size={16} className="text-accent-gold" />
               {isExpanded && <span className="ml-4 text-neutral-lightGray">Search</span>}
             </motion.div>
+            {!isExpanded && <Tooltip id="nav-tooltip-search" place="right" />}
             {isSearchOpen && (
               <motion.form
                 onSubmit={handleSearch}
@@ -411,6 +435,8 @@ function Sidebar({ children }: SidebarProps) {
             tabIndex={0}
             role="button"
             aria-label="Log out"
+            data-tooltip-id="nav-tooltip-logout"
+            data-tooltip-content="Log out"
           >
             <FaSignOutAlt size={16} className="text-accent-gold" />
             {isExpanded && (
@@ -419,6 +445,7 @@ function Sidebar({ children }: SidebarProps) {
               </span>
             )}
           </motion.div>
+          {!isExpanded && <Tooltip id="nav-tooltip-logout" place="right" />}
         </div>
       </motion.div>
 
@@ -450,17 +477,6 @@ function Sidebar({ children }: SidebarProps) {
             aria-label="Open search"
           >
             <FaSearch size={24} />
-          </motion.div>
-          <motion.div
-            whileTap={{ scale: 0.9 }}
-            className="relative flex items-center justify-center p-3 rounded-full focus:outline-none focus:ring-2 focus:ring-accent-gold text-neutral-lightGray hover:text-accent-gold"
-            onClick={() => setIsHamburgerOpen(true)}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => handleKeyDown(e, () => setIsHamburgerOpen(true))}
-            aria-label="Open more options"
-          >
-            <FaBars size={24} />
           </motion.div>
         </div>
       </motion.div>
@@ -512,11 +528,11 @@ function Sidebar({ children }: SidebarProps) {
 
       {/* Main Content */}
       <div
-        className={`flex-1 overflow-y-auto p-6 pt-4 transition-all duration-300 md:pt-4 ${
+        className={`flex-1 overflow-y-auto p-6 pt-16 md:pt-4 transition-all duration-300 ${
           isExpanded ? 'md:pl-80' : 'md:pl-20'
         } pb-20 md:pb-6`}
       >
-        {children} {/* Render the Routes passed as children */}
+        {children}
       </div>
     </div>
   );

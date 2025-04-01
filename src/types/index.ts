@@ -106,18 +106,19 @@ export interface BusinessData {
 }
 
 export interface UserData {
+  uid: string; // Added uid
   displayName: string;
   email: string;
   createdAt: string;
-  bio: string;
-  location: string;
-  photoURL: string;
-  contactEmail: string;
-  contactPhone: string;
-  followers: string[];
-  following: string[];
+  bio?: string; // Made optional
+  location?: string; // Made optional
+  photoURL?: string; // Made optional
+  contactEmail?: string; // Made optional
+  contactPhone?: string; // Made optional
+  followers?: string[]; // Made optional
+  following?: string[]; // Made optional
   notificationsEnabled: boolean;
-  role: string; // Add role property
+  role: string;
 }
 
 export interface ChatData {

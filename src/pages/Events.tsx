@@ -7,7 +7,7 @@ import { toast } from 'react-toastify';
 import defaultEventImage from '../assets/default-event.jpg';
 import { multiStepCreateEvent } from '../services/eventCreation';
 import { db } from '../services/firebase';
-import { EventData, MultiStepEventData, NormalizedEventData, EventCategory, ServiceData } from '../types';
+import { EventData, MultiStepEventData, NormalizedEventData, EventCategory } from '../types';
 import { normalizeEventData } from '../utils/normalizeEvent';
 import { FaPlus, FaCheck, FaTimes, FaEllipsisH, FaComments, FaTrash } from 'react-icons/fa';
 import { Link, useNavigate } from 'react-router-dom';
@@ -25,7 +25,10 @@ function Events() {
   const menuRef = useRef<HTMLDivElement>(null);
 
   const handleSuccess = useCallback((newEventData: NormalizedEventData) => {
-    setEvents((prev) => [newEventData, ...prev].slice(0, 4));
+    setEvents((prev) => {
+      const updatedEvents = [newEventData, ...prev.filter((event) => event.id !== newEventData.id)].slice(0, 4);
+      return updatedEvents;
+    });
     setShowModal(false);
     toast.success('Event created successfully!');
   }, []);
@@ -75,7 +78,6 @@ function Events() {
     },
   };
 
-  // Fetch accessible events for the current user (for private events)
   useEffect(() => {
     if (!currentUser) {
       setAccessibleEvents([]);
@@ -110,7 +112,6 @@ function Events() {
     return () => unsubscribeUserEvents();
   }, [currentUser]);
 
-  // Fetch all events (public and private)
   useEffect(() => {
     if (!currentUser) {
       setLoading(false);
@@ -132,7 +133,13 @@ function Events() {
           return normalizeEventData({ id: doc.id, ...data } as EventData);
         });
 
-        const filteredEvents = eventData
+        const uniqueEventsMap = new Map<string, NormalizedEventData>();
+        eventData.forEach((event) => {
+          uniqueEventsMap.set(event.id, event);
+        });
+        const uniqueEvents = Array.from(uniqueEventsMap.values());
+
+        const filteredEvents = uniqueEvents
           .filter((event) => {
             const eventDate = new Date(event.date || event.createdAt);
             const isPublic = event.visibility === 'public';
@@ -161,23 +168,64 @@ function Events() {
     return () => unsubscribeEvents();
   }, [currentUser, navigate, accessibleEvents]);
 
-  // Handle service selection and navigate to business page with filtered category
   const handleServiceSelection = useCallback(
-    async (eventId: string, serviceType: 'refreshments' | 'venue' | 'catering') => {
+    async (eventId: string, serviceType: 'music' | 'decoration' | 'photography') => {
       const categoryMap: { [key: string]: string } = {
-        refreshments: 'Refreshments',
-        venue: 'Venue Provider',
-        catering: 'Catering/Food',
+        music: 'Music',
+        decoration: 'Decoration',
+        photography: 'Photography',
       };
       const category = categoryMap[serviceType];
-      navigate(`/businesses?eventId=${eventId}&category=${category}`); // Correct path to /businesses
+      navigate(`/businesses?eventId=${eventId}&category=${category}`);
       setMenuOpen(null);
     },
     [navigate]
   );
 
-  // Remove a service from an event
-  const removeServiceFromEvent = useCallback(
+  const handleAddServiceToEvent = useCallback(
+    async (eventId: string, businessId: string, businessName: string, serviceType: string) => {
+      try {
+        const eventRef = doc(db, 'events', eventId);
+        const eventSnap = await getDoc(eventRef);
+        if (!eventSnap.exists()) {
+          throw new Error('Event not found');
+        }
+        const eventData = eventSnap.data() as EventData;
+
+        await updateDoc(eventRef, {
+          service: {
+            businessId,
+            businessName,
+            type: serviceType,
+          },
+          products: [],
+        });
+
+        toast.success(`Service (${serviceType}) added to event by ${businessName}.`);
+
+        const members = [...(eventData.invitedUsers || []), ...(eventData.organizers || [])].filter(
+          (userId) => userId !== currentUser?.uid
+        );
+        const notificationPromises = members.map((userId) =>
+          addDoc(collection(db, 'users', userId, 'notifications'), {
+            type: 'event_update',
+            eventId: eventId,
+            eventTitle: eventData.title,
+            message: `A new service (${serviceType}) by ${businessName} has been added to event "${eventData.title}".`,
+            createdAt: new Date().toISOString(),
+            status: 'unread',
+          })
+        );
+        await Promise.all(notificationPromises);
+      } catch (err) {
+        toast.error('Failed to add service to event.');
+        console.error(err);
+      }
+    },
+    [currentUser]
+  );
+
+  const handleRemoveServiceFromEvent = useCallback(
     async (eventId: string, eventTitle: string) => {
       try {
         const eventRef = doc(db, 'events', eventId);
@@ -187,14 +235,12 @@ function Events() {
         }
         const eventData = eventSnap.data() as EventData;
         const members = [...(eventData.invitedUsers || []), ...(eventData.organizers || [])].filter(
-          (userId) => userId !== currentUser?.uid // Exclude the current user
+          (userId) => userId !== currentUser?.uid
         );
 
-        // Update the event
         await updateDoc(eventRef, { service: null, products: [] });
         toast.success('Service removed from event.');
 
-        // Send notification to each event member
         const notificationPromises = members.map((userId) =>
           addDoc(collection(db, 'users', userId, 'notifications'), {
             type: 'event_update',
@@ -214,7 +260,6 @@ function Events() {
     [currentUser]
   );
 
-  // Close menu when clicking outside
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
@@ -225,7 +270,6 @@ function Events() {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Focus management for the modal
   useEffect(() => {
     if (showModal && modalRef.current) {
       const focusableElements = modalRef.current.querySelectorAll(
@@ -357,7 +401,6 @@ function Events() {
                   className="bg-neutral-darkGray rounded-lg overflow-hidden shadow-md relative"
                   variants={fadeIn}
                 >
-                  {/* Event Type Tag */}
                   <div
                     className={`absolute top-2 left-2 px-2 py-1 rounded-full text-xs font-medium ${
                       event.visibility === 'public'
@@ -368,15 +411,14 @@ function Events() {
                     {event.visibility === 'public' ? 'Public' : 'Private'}
                   </div>
 
-                  {/* Three-Dot Menu and Add Product Button */}
                   <div className="absolute top-2 right-2 flex space-x-2">
                     {currentUser?.uid === event.userId && (
                       <motion.button
-                        onClick={() => handleServiceSelection(event.id, 'refreshments')}
+                        onClick={() => handleServiceSelection(event.id, 'music')}
                         className="text-neutral-lightGray hover:text-accent-gold transition-colors p-1"
                         whileHover={{ scale: 1.2 }}
                         whileTap={{ scale: 0.9 }}
-                        aria-label="Add product to event"
+                        aria-label="Add service to event"
                       >
                         <FaPlus size={16} />
                       </motion.button>
@@ -391,7 +433,7 @@ function Events() {
                       <FaEllipsisH size={16} />
                     </motion.button>
                     <AnimatePresence>
-                      {menuOpen === event.id && (
+                      {menuOpen === event.id && currentUser?.uid === event.userId && (
                         <motion.div
                           ref={menuRef}
                           className="absolute right-0 mt-2 w-48 bg-neutral-mediumGray/90 backdrop-blur-lg rounded-lg shadow-lg border border-neutral-mediumGray/50 z-10"
@@ -400,22 +442,22 @@ function Events() {
                           exit={{ opacity: 0, scale: 0.95 }}
                         >
                           <button
-                            onClick={() => handleServiceSelection(event.id, 'refreshments')}
+                            onClick={() => handleServiceSelection(event.id, 'music')}
                             className="block w-full text-left px-4 py-2 text-sm text-white hover:bg-secondary-deepRed/50 rounded-t-lg"
                           >
-                            Add Refreshments
+                            Add Music
                           </button>
                           <button
-                            onClick={() => handleServiceSelection(event.id, 'venue')}
+                            onClick={() => handleServiceSelection(event.id, 'decoration')}
                             className="block w-full text-left px-4 py-2 text-sm text-white hover:bg-secondary-deepRed/50"
                           >
-                            Book a Venue
+                            Add Decoration
                           </button>
                           <button
-                            onClick={() => handleServiceSelection(event.id, 'catering')}
+                            onClick={() => handleServiceSelection(event.id, 'photography')}
                             className="block w-full text-left px-4 py-2 text-sm text-white hover:bg-secondary-deepRed/50 rounded-b-lg"
                           >
-                            Add Food and Catering
+                            Add Photography
                           </button>
                         </motion.div>
                       )}
@@ -435,7 +477,6 @@ function Events() {
                     </p>
                     <p className="text-sm text-neutral-lightGray mt-1">{event.location || 'Location TBD'}</p>
 
-                    {/* Service Provided Tag */}
                     {event.service && (
                       <div className="mt-2 flex items-center space-x-2">
                         <Link
@@ -446,7 +487,7 @@ function Events() {
                         </Link>
                         {currentUser?.uid === event.userId && (
                           <motion.button
-                            onClick={() => removeServiceFromEvent(event.id, event.title)}
+                            onClick={() => handleRemoveServiceFromEvent(event.id, event.title)}
                             className="text-red-500 hover:text-red-400 transition-colors"
                             whileHover={{ scale: 1.2 }}
                             whileTap={{ scale: 0.9 }}
@@ -488,7 +529,6 @@ function Events() {
         </motion.div>
       </motion.section>
 
-      {/* Multi-Step Modal */}
       {showModal && currentUser && (
         <div
           className="fixed inset-0 bg-black bg-opacity-70 backdrop-blur-sm flex items-center justify-center z-50 p-4 overflow-y-auto"
@@ -497,7 +537,7 @@ function Events() {
           <motion.div
             ref={modalRef}
             onClick={(e) => e.stopPropagation()}
-            className="bg-neutral-mediumGray/90 backdrop-blur-lg rounded-2xl max-w-md w-full mx-2 p-4 sm:p-6 relative shadow-2xl border border-neutral-mediumGray/50"
+            className="bg-gray-200 rounded-2xl max-w-md w-full mx-2 p-4 sm:p-6 relative shadow-2xl border border-gray-300"
             role="dialog"
             aria-labelledby="multi-step-create-event-title"
             initial={{ opacity: 0, scale: 0.95, y: 30 }}
@@ -508,7 +548,7 @@ function Events() {
             <motion.button
               type="button"
               onClick={() => setShowModal(false)}
-              className="absolute top-3 right-3 sm:top-4 sm:right-4 text-white hover:text-accent-gold transition-colors z-10"
+              className="absolute top-3 right-3 sm:top-4 sm:right-4 text-black hover:text-accent-gold transition-colors z-10"
               whileHover={{ scale: 1.2, rotate: 90 }}
               whileTap={{ scale: 0.9 }}
               aria-label="Close modal"
@@ -518,7 +558,7 @@ function Events() {
 
             <motion.h3
               id="multi-step-create-event-title"
-              className="text-xl sm:text-2xl font-bold text-accent-gold mb-4 sm:mb-6 text-center"
+              className="text-xl sm:text-2xl font-bold text-black mb-4 sm:mb-6 text-center"
               initial={{ opacity: 0, y: -20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.2 }}
@@ -534,7 +574,7 @@ function Events() {
                 <div key={stepNum} className="flex flex-col items-center relative z-10">
                   <motion.div
                     className={`w-8 h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center text-xs sm:text-sm font-semibold transition-all duration-300 ${
-                      stepNum <= step ? 'bg-accent-gold text-neutral-darkGray' : 'bg-neutral-mediumGray text-white'
+                      stepNum <= step ? 'bg-accent-gold text-black' : 'bg-gray-400 text-black'
                     }`}
                     initial={{ scale: 0 }}
                     animate={{ scale: 1 }}
@@ -545,7 +585,7 @@ function Events() {
                   {stepNum < 4 && (
                     <div
                       className={`absolute top-4 sm:top-5 left-1/2 w-[calc(100%+16px)] sm:w-[calc(100%+20px)] h-1 transform translate-x-4 sm:translate-x-5 ${
-                        stepNum < step ? 'bg-accent-gold' : 'bg-neutral-mediumGray'
+                        stepNum < step ? 'bg-accent-gold' : 'bg-gray-400'
                       }`}
                     />
                   )}
@@ -555,7 +595,7 @@ function Events() {
 
             {error && (
               <motion.p
-                className="text-red-500 text-xs sm:text-sm p-2 sm:p-3 bg-red-500/20 rounded-lg mb-3 sm:mb-4 text-center"
+                className="text-red-600 text-xs sm:text-sm p-2 sm:p-3 bg-red-100 rounded-lg mb-3 sm:mb-4 text-center"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
               >
@@ -572,33 +612,33 @@ function Events() {
                   transition={{ delay: 0.3 }}
                 >
                   <div>
-                    <label htmlFor="title" className="block text-xs sm:text-sm text-white mb-1">
+                    <label htmlFor="title" className="block text-xs sm:text-sm text-black mb-1">
                       Event Title
                     </label>
                     <input
                       id="title"
                       value={newEvent.title}
                       onChange={(e) => setNewEvent({ ...newEvent, title: e.target.value })}
-                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-white border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base placeholder-gray-400"
+                      className="w-full p-2 sm:p-3 rounded-lg bg-white text-black border border-gray-300 focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base placeholder-gray-500"
                       placeholder="Enter event title"
                       required
                     />
                   </div>
                   <div>
-                    <label htmlFor="location" className="block text-xs sm:text-sm text-white mb-1">
+                    <label htmlFor="location" className="block text-xs sm:text-sm text-black mb-1">
                       Location
                     </label>
                     <input
                       id="location"
                       value={newEvent.location}
                       onChange={(e) => setNewEvent({ ...newEvent, location: e.target.value })}
-                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-white border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base placeholder-gray-400"
+                      className="w-full p-2 sm:p-3 rounded-lg bg-white text-black border border-gray-300 focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base placeholder-gray-500"
                       placeholder="Enter location"
                       required
                     />
                   </div>
                   <div>
-                    <label htmlFor="date" className="block text-xs sm:text-sm text-white mb-1">
+                    <label htmlFor="date" className="block text-xs sm:text-sm text-black mb-1">
                       Date
                     </label>
                     <input
@@ -606,27 +646,27 @@ function Events() {
                       type="date"
                       value={newEvent.date}
                       onChange={(e) => setNewEvent({ ...newEvent, date: e.target.value })}
-                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-white border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
+                      className="w-full p-2 sm:p-3 rounded-lg bg-white text-black border border-gray-300 focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
                       required
                       min={new Date().toISOString().split('T')[0]}
                     />
                   </div>
                   <div>
-                    <label htmlFor="visibility" className="block text-xs sm:text-sm text-white mb-1">
+                    <label htmlFor="visibility" className="block text-xs sm:text-sm text-black mb-1">
                       Visibility
                     </label>
                     <select
                       id="visibility"
                       value={newEvent.visibility}
                       onChange={(e) => setNewEvent({ ...newEvent, visibility: e.target.value as 'public' | 'private' })}
-                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-white border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
+                      className="w-full p-2 sm:p-3 rounded-lg bg-white text-black border border-gray-300 focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
                     >
                       <option value="public">Public</option>
                       <option value="private">Private</option>
                     </select>
                   </div>
                   <div>
-                    <label htmlFor="category" className="block text-xs sm:text-sm text-white mb-1">
+                    <label htmlFor="category" className="block text-xs sm:text-sm text-black mb-1">
                       Category
                     </label>
                     <select
@@ -638,15 +678,12 @@ function Events() {
                           category: e.target.value as EventCategory,
                         })
                       }
-                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-white border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
+                      className="w-full p-2 sm:p-3 rounded-lg bg-white text-black border border-gray-300 focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base"
                     >
                       <option value="General">General</option>
                       <option value="Music">Music</option>
                       <option value="Food">Food</option>
                       <option value="Tech">Tech</option>
-                      <option value="Refreshments">Refreshments</option>
-                      <option value="Catering/Food">Catering/Food</option>
-                      <option value="Venue Provider">Venue Provider</option>
                     </select>
                   </div>
                   <motion.button
@@ -655,7 +692,7 @@ function Events() {
                       if (newEvent.title) searchImages(newEvent.title);
                       handleNextStep();
                     }}
-                    className="w-full bg-accent-gold text-neutral-darkGray p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base"
+                    className="w-full bg-accent-gold text-black p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                     disabled={multiStepLoading || !newEvent.title || !newEvent.location || !newEvent.date}
@@ -665,7 +702,7 @@ function Events() {
                   <motion.button
                     type="button"
                     onClick={() => setShowModal(false)}
-                    className="w-full bg-neutral-mediumGray text-white p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all text-sm sm:text-base"
+                    className="w-full bg-gray-400 text-black p-2 sm:p-3 rounded-lg hover:bg-gray-500 transition-all text-sm sm:text-base"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                   >
@@ -680,10 +717,10 @@ function Events() {
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: 0.3 }}
                 >
-                  <p className="text-white text-center text-sm sm:text-base">Would you like to invite collaborators?</p>
+                  <p className="text-black text-center text-sm sm:text-base">Would you like to invite collaborators?</p>
                   <motion.button
                     onClick={() => handleNextStep()}
-                    className="w-full bg-neutral-mediumGray text-white p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all shadow-md text-sm sm:text-base"
+                    className="w-full bg-gray-400 text-black p-2 sm:p-3 rounded-lg hover:bg-gray-                    500 transition-all shadow-md text-sm sm:text-base"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                   >
@@ -692,7 +729,7 @@ function Events() {
                   {followers.length > 0 && (
                     <motion.button
                       onClick={handleNextStep}
-                      className="w-full bg-accent-gold text-neutral-darkGray p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base"
+                      className="w-full bg-accent-gold text-black p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base"
                       whileHover={{ scale: 1.05 }}
                       whileTap={{ scale: 0.95 }}
                     >
@@ -700,18 +737,18 @@ function Events() {
                     </motion.button>
                   )}
                   <div>
-                    <h3 className="text-xs sm:text-sm text-white mb-2">Your Followers:</h3>
+                    <h3 className="text-xs sm:text-sm text-black mb-2">Your Followers:</h3>
                     {followers.length > 0 ? (
-                      <div className="max-h-32 sm:max-h-40 overflow-y-auto scrollbar-thin scrollbar-thumb-neutral-mediumGray scrollbar-track-neutral-darkGray">
+                      <div className="max-h-32 sm:max-h-40 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-400 scrollbar-track-gray-200">
                         {followers.map((followerId: string) => (
                           <motion.div
                             key={followerId}
-                            className="flex items-center justify-between py-1 sm:py-2 px-2 sm:px-3 bg-neutral-mediumGray rounded-lg mb-2"
+                            className="flex items-center justify-between py-1 sm:py-2 px-2 sm:px-3 bg-gray-300 rounded-lg mb-2"
                             initial={{ opacity: 0, y: 10 }}
                             animate={{ opacity: 1, y: 0 }}
                             transition={{ delay: 0.1 }}
                           >
-                            <span className="text-xs sm:text-sm text-white">{followerNames[followerId] || followerId}</span>
+                            <span className="text-xs sm:text-sm text-black">{followerNames[followerId] || followerId}</span>
                             <motion.button
                               onClick={() =>
                                 setNewEvent((prev: MultiStepEventData) => {
@@ -732,10 +769,10 @@ function Events() {
                         ))}
                       </div>
                     ) : (
-                      <p className="text-xs sm:text-sm text-white text-center">You have no followers yet.</p>
+                      <p className="text-xs sm:text-sm text-black text-center">You have no followers yet.</p>
                     )}
                   </div>
-                  <p className="text-xs sm:text-sm text-white text-center">
+                  <p className="text-xs sm:text-sm text-black text-center">
                     Selected Organizers: {newEvent.organizers.map((org: string) => followerNames[org] || org).join(', ') || 'None'}
                   </p>
                   <motion.button
@@ -743,7 +780,7 @@ function Events() {
                       const link = createShareLink();
                       toast.success(`Invite link created: ${link}`);
                     }}
-                    className="w-full bg-accent-gold text-neutral-darkGray p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base"
+                    className="w-full bg-accent-gold text-black p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                   >
@@ -752,7 +789,7 @@ function Events() {
                   <motion.button
                     type="button"
                     onClick={handlePrevStep}
-                    className="w-full bg-neutral-mediumGray text-white p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all shadow-md text-sm sm:text-base"
+                    className="w-full bg-gray-400 text-black p-2 sm:p-3 rounded-lg hover:bg-gray-500 transition-all shadow-md text-sm sm:text-base"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                   >
@@ -761,7 +798,7 @@ function Events() {
                   <motion.button
                     type="button"
                     onClick={() => setShowModal(false)}
-                    className="w-full bg-neutral-mediumGray text-white p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all text-sm sm:text-base"
+                    className="w-full bg-gray-400 text-black p-2 sm:p-3 rounded-lg hover:bg-gray-500 transition-all text-sm sm:text-base"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                   >
@@ -776,9 +813,9 @@ function Events() {
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: 0.3 }}
                 >
-                  <p className="text-white text-center text-sm sm:text-base">Select an image for your event:</p>
+                  <p className="text-black text-center text-sm sm:text-base">Select an image for your event:</p>
                   {searchedImages.length > 0 ? (
-                    <div className="grid grid-cols-3 gap-2 sm:gap-3 max-h-40 sm:max-h-48 overflow-y-auto scrollbar-thin scrollbar-thumb-neutral-mediumGray scrollbar-track-neutral-darkGray">
+                    <div className="grid grid-cols-3 gap-2 sm:gap-3 max-h-40 sm:max-h-48 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-400 scrollbar-track-gray-200">
                       {searchedImages.map((url: string, index: number) => (
                         <motion.img
                           key={index}
@@ -799,17 +836,17 @@ function Events() {
                       ))}
                     </div>
                   ) : (
-                    <p className="text-xs sm:text-sm text-white text-center">No images found. Please proceed.</p>
+                    <p className="text-xs sm:text-sm text-black text-center">No images found. Please proceed.</p>
                   )}
                   <div>
-                    <label htmlFor="description" className="block text-xs sm:text-sm text-white mb-1 sm:mb-2">
+                    <label htmlFor="description" className="block text-xs sm:text-sm text-black mb-1 sm:mb-2">
                       Description (optional)
                     </label>
                     <textarea
                       id="description"
                       value={newEvent.description}
                       onChange={(e) => setNewEvent({ ...newEvent, description: e.target.value })}
-                      className="w-full p-2 sm:p-3 rounded-lg bg-neutral-mediumGray text-white border border-neutral-mediumGray focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base placeholder-gray-400"
+                      className="w-full p-2 sm:p-3 rounded-lg bg-white text-black border border-gray-300 focus:outline-none focus:ring-2 focus:ring-accent-gold transition-all text-sm sm:text-base placeholder-gray-500"
                       rows={3}
                       placeholder="Describe your event..."
                     />
@@ -817,7 +854,7 @@ function Events() {
                   <motion.button
                     type="button"
                     onClick={handleNextStep}
-                    className="w-full bg-accent-gold text-neutral-darkGray p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base"
+                    className="w-full bg-accent-gold text-black p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                     disabled={multiStepLoading || !newEvent.selectedImage}
@@ -827,7 +864,7 @@ function Events() {
                   <motion.button
                     type="button"
                     onClick={handlePrevStep}
-                    className="w-full bg-neutral-mediumGray text-white p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all shadow-md text-sm sm:text-base"
+                    className="w-full bg-gray-400 text-black p-2 sm:p-3 rounded-lg hover:bg-gray-500 transition-all shadow-md text-sm sm:text-base"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                   >
@@ -836,7 +873,7 @@ function Events() {
                   <motion.button
                     type="button"
                     onClick={() => setShowModal(false)}
-                    className="w-full bg-neutral-mediumGray text-white p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all text-sm sm:text-base"
+                    className="w-full bg-gray-400 text-black p-2 sm:p-3 rounded-lg hover:bg-gray-500 transition-all text-sm sm:text-base"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                   >
@@ -851,9 +888,9 @@ function Events() {
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: 0.3 }}
                 >
-                  <p className="text-white text-center mb-3 sm:mb-4 text-sm sm:text-base">Preview your event:</p>
+                  <p className="text-black text-center mb-3 sm:mb-4 text-sm sm:text-base">Preview your event:</p>
                   <motion.div
-                    className="relative w-full h-72 sm:h-80 bg-neutral-mediumGray/50 rounded-xl overflow-hidden shadow-lg transition-all duration-300"
+                    className="relative w-full h-72 sm:h-80 bg-gray-300 rounded-xl overflow-hidden shadow-lg transition-all duration-300"
                     whileTap={{ scale: 0.98 }}
                   >
                     <img
@@ -871,7 +908,7 @@ function Events() {
                   </motion.div>
                   <motion.button
                     onClick={multiStepHandleCreateEvent}
-                    className="w-full bg-accent-gold text-neutral-darkGray p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base"
+                    className="w-full bg-accent-gold text-black p-2 sm:p-3 rounded-lg hover:bg-yellow-300 transition-all shadow-md text-sm sm:text-base"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                     disabled={multiStepLoading}
@@ -881,7 +918,7 @@ function Events() {
                   <motion.button
                     type="button"
                     onClick={handlePrevStep}
-                    className="w-full bg-neutral-mediumGray text-white p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all shadow-md text-sm sm:text-base"
+                    className="w-full bg-gray-400 text-black p-2 sm:p-3 rounded-lg hover:bg-gray-500 transition-all shadow-md text-sm sm:text-base"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                   >
@@ -890,7 +927,7 @@ function Events() {
                   <motion.button
                     type="button"
                     onClick={() => setShowModal(false)}
-                    className="w-full bg-neutral-mediumGray text-white p-2 sm:p-3 rounded-lg hover:bg-neutral-mediumGray/80 transition-all text-sm sm:text-base"
+                    className="w-full bg-gray-400 text-black p-2 sm:p-3 rounded-lg hover:bg-gray-500 transition-all text-sm sm:text-base"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                   >
